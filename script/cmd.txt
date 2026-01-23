@@ -1,0 +1,43 @@
+CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
+    --data_dir /home/yiinqiang/SMBC/gsplat/gsplat/examples/data/360_v2/garden/ --data_factor 4 \
+    --result_dir ./results/garden
+
+colmap model_converter \
+    --input_path /home/yiinqiang/SMBC/data/split_dataset_GT_Optimized/sparse/0 \
+    --output_path /home/yiinqiang/SMBC/data/split_dataset_GT_Optimized/sparse/0 \
+    --output_type BIN
+
+# Greenhouse K1 - 基础版本 (30k iterations)
+CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
+    --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_NoOptimization \
+    --data_factor 1 \
+    --result_dir ./results/greenhouse_K1_NoOpti_step20x \
+    --steps_scaler 20.0
+
+# Greenhouse K1 - 高质量版本 (更多迭代 + 更高SH度数)
+CUDA_VISIBLE_DEVICES=1 python simple_trainer.py default \
+    --data_dir /home/yiinqiang/SMBC/data/split_dataset_GT_Optimized \
+    --data_factor 1 \
+    --result_dir ./results/greenhouse_K1_hq_ite300k \
+    --max_steps 300000 \
+    --eval_steps 30000 100000 300000 \
+    --save_steps 30000 100000 300000
+
+# Greenhouse K1 - MCMC策略 (可能更好的细节)
+CUDA_VISIBLE_DEVICES=0 python simple_trainer.py mcmc \
+    --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_GT_Optimized \
+    --data_factor 1 \
+    --result_dir ./results/greenhouse_K1_mcmc \
+    --max_steps 90000 \
+    --eval_steps 30000 90000 \
+    --save_steps 30000 90000 \
+    --init_scale 1.0 \
+    --init_opa 0.1 \
+    --opacity_reg 0.001 \
+    --scale_reg 0.001
+
+
+CUDA_VISIBLE_DEVICES=1 python -m simple_viewer \
+    --ckpt results/garden/ckpts/ckpt_6999_rank0.pt \
+    --output_dir results/garden/ \
+    --port 8082
