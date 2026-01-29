@@ -400,7 +400,10 @@ class Dataset:
         self.patch_size = patch_size
         self.load_depths = load_depths
         indices = np.arange(len(self.parser.image_names))
-        if split == "train":
+        if self.parser.test_every == 0:
+            # test_every=0 means all images for training, none for test
+            self.indices = indices if split == "train" else np.array([], dtype=np.int64)
+        elif split == "train":
             self.indices = indices[indices % self.parser.test_every != 0]
         else:
             self.indices = indices[indices % self.parser.test_every == 0]
