@@ -3,41 +3,96 @@ CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
     --result_dir ./results/garden
 
 colmap model_converter \
-    --input_path /home/yiinqiang/SMBC/data/split_dataset_GT_Optimized/sparse/0 \
-    --output_path /home/yiinqiang/SMBC/data/split_dataset_GT_Optimized/sparse/0 \
+    --input_path /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_MyOpti/sparse/0 \
+    --output_path /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_MyOpti/sparse/0 \
     --output_type BIN
 
-# Greenhouse K1 - 基础版本 (30k iterations)
+colmap model_converter \
+    --input_path /home/yiinqiang/SMBC/data/Forest_Karamatsu_plot2/perspective/sparse \
+    --output_path /home/yiinqiang/SMBC/data/Forest_Karamatsu_plot2/perspective/sparse \
+    --output_type BIN
+
+
+# --- TRAINING ---
+
+CUDA_VISIBLE_DEVICES=3 python simple_trainer.py default \
+    --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_MyOpti \
+    --data_factor 1 \
+    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/greenhouse_K1_MyCMR_opti_LAS_step20x \
+    --steps_scaler 20.0 \
+    --pose_opt \
+    --test_every 0
+
+CUDA_VISIBLE_DEVICES=3 python simple_trainer.py default \
+    --data_dir /home/yiinqiang/SMBC/data/tanashi-peach1_20251129-124511_k1/temp_1110/perspective \
+    --data_factor 1 \
+    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_MyCMR_opti_step40x_SH2_grow05x \
+    --steps_scaler 40.0 \
+    --pose_opt \
+    --test_every 0 \
+    --sh_degree 2 \
+    --strategy.grow_grad2d 0.0001 \
+    --strategy.grow_scale3d 0.005
+
 CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
-    --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_NoOptimization \
+    --data_dir /home/yiinqiang/SMBC/data/Forest_Karamatsu_plot2/perspective \
     --data_factor 1 \
-    --result_dir ./results/greenhouse_K1_NoOpti_step20x \
-    --steps_scaler 20.0
+    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_Karamatsu_plot2_RawCMR_opti_step40x_SH2_re \
+    --resume /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_Karamatsu_plot2_RawCMR_opti_step40x_SH2_re/ckpts/ckpt_279999_rank0.pt \
+    --steps_scaler 40.0 \
+    --pose_opt \
+    --test_every 0 \
+    --sh_degree 2 \
+    --eval_train
 
-# Greenhouse K1 - 高质量版本 (更多迭代 + 更高SH度数)
 CUDA_VISIBLE_DEVICES=1 python simple_trainer.py default \
-    --data_dir /home/yiinqiang/SMBC/data/split_dataset_GT_Optimized \
+    --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_MyOpti \
     --data_factor 1 \
-    --result_dir ./results/greenhouse_K1_hq_ite300k \
-    --max_steps 300000 \
-    --eval_steps 30000 100000 300000 \
-    --save_steps 30000 100000 300000
+    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/greenhouse_K1_MyCMR_opti_step40x \
+    --resume /home/yiinqiang/SMBC/gsplat/results_RawCMR/greenhouse_K1_RawCMR_opti_step20x_fullSeq/ckpts/ckpt_599999_rank0.pt \
+    --steps_scaler 40.0 \
+    --pose_opt \
+    --test_every 999999
 
-# Greenhouse K1 - MCMC策略 (可能更好的细节)
-CUDA_VISIBLE_DEVICES=0 python simple_trainer.py mcmc \
-    --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_GT_Optimized \
+# Greenhouse K1 - MCMC strategy (potentially better details)
+CUDA_VISIBLE_DEVICES=3 python simple_trainer.py mcmc \
+    --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_MyOpti \
     --data_factor 1 \
-    --result_dir ./results/greenhouse_K1_mcmc \
-    --max_steps 90000 \
-    --eval_steps 30000 90000 \
-    --save_steps 30000 90000 \
-    --init_scale 1.0 \
-    --init_opa 0.1 \
-    --opacity_reg 0.001 \
-    --scale_reg 0.001
+    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/greenhouse_K1_MyCMR_opti_LAS20x_step20x_mcmc \
+    --steps_scaler 20.0 \
+    --pose_opt \
+    --test_every 0
 
+CUDA_VISIBLE_DEVICES=0,1,2,3 python simple_trainer.py mcmc \
+      --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_MyOpti \
+      --data_factor 1 \
+      --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/greenhouse_K1_MyCMR_opti_LAS20x_step20x_mcmc \
+      --steps_scaler 5.0 \
+      --pose_opt \
+      --test_every 0 \
+      --packed
+
+
+# --- VIEWER ---
 
 CUDA_VISIBLE_DEVICES=1 python -m simple_viewer \
-    --ckpt results/garden/ckpts/ckpt_6999_rank0.pt \
-    --output_dir results/garden/ \
+    --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_RawCMR_opti_LAS20x_step20x/ckpts/ckpt_599999_rank0.pt \
+    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_RawCMR_opti_LAS20x_step20x/viewer/ \
     --port 8082
+
+CUDA_VISIBLE_DEVICES=3 python -m simple_viewer \
+    --ckpt /home/yiinqiang/SMBC/gsplat/results_GTcmr/greenhouse_K1_step20x/ckpts/ckpt_599999_rank0.pt \
+    --output_dir /home/yiinqiang/SMBC/gsplat/results_GTcmr/greenhouse_K1_step20x/ckpts/viewer/ \
+    --port 8083
+
+
+# --- EXPORT CHECKPOINT ---
+
+# PLY only
+python script/export_ckpt.py --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/greenhouse_K1_RawCMR_opti_step20x/ckpts/ckpt_599999_rank0.pt
+
+# PLY + poses
+python script/export_ckpt.py --ckpt results/xxx/ckpts/ckpt_29999_rank0.pt --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_NoOptimization
+
+# Poses only
+python script/export_ckpt.py --ckpt results/xxx/ckpts/ckpt_29999_rank0.pt --data_dir data/xxx --no-export_ply

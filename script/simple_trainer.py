@@ -82,6 +82,8 @@ class Config:
     max_steps: int = 30_000
     # Steps to evaluate the model
     eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    # Also render training images during eval (with pose adjustment applied)
+    eval_train: bool = False
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
     # Whether to save ply file (storage size can be large)
@@ -917,7 +919,9 @@ class Runner:
 
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps]:
-                self.eval(step)
+                self.eval(step, stage="val")
+                if cfg.eval_train:
+                    self.eval(step, stage="train")
                 self.render_traj(step)
 
             # run compression
@@ -939,24 +943,46 @@ class Runner:
 
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
-        """Entry for evaluation."""
-        print("Running evaluation...")
+        """Entry for evaluation.
+
+        Args:
+            step: current training step
+            stage: "val" for validation set, "train" for training set
+        """
         cfg = self.cfg
         device = self.device
         world_rank = self.world_rank
         world_size = self.world_size
 
-        valloader = torch.utils.data.DataLoader(
-            self.valset, batch_size=1, shuffle=False, num_workers=1
+        # Select dataset based on stage
+        if stage == "train":
+            dataset = self.trainset
+        else:
+            dataset = self.valset
+
+        # Skip evaluation if dataset is empty
+        if len(dataset) == 0:
+            print(f"Skipping evaluation: {stage} set is empty")
+            return
+
+        print(f"Running evaluation on {stage} set ({len(dataset)} images)...")
+
+        dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=1, shuffle=False, num_workers=1
         )
         ellipse_time = 0
         metrics = defaultdict(list)
-        for i, data in enumerate(valloader):
+        for i, data in enumerate(dataloader):
             camtoworlds = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
             masks = data["mask"].to(device) if "mask" in data else None
             height, width = pixels.shape[1:3]
+            image_ids = data["image_id"].to(device)
+
+            # Apply pose adjustment for training images
+            if stage == "train" and cfg.pose_opt:
+                camtoworlds = self.pose_adjust(camtoworlds, image_ids)
 
             torch.cuda.synchronize()
             tic = time.time()
@@ -969,6 +995,7 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 masks=masks,
+                image_ids=image_ids if stage == "train" else None,
             )  # [1, H, W, 3]
             torch.cuda.synchronize()
             ellipse_time += max(time.time() - tic, 1e-10)
@@ -998,7 +1025,7 @@ class Runner:
                     metrics["cc_lpips"].append(self.lpips(cc_colors_p, pixels_p))
 
         if world_rank == 0:
-            ellipse_time /= len(valloader)
+            ellipse_time /= len(dataloader)
 
             stats = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
             stats.update(

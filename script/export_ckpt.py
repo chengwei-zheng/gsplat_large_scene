@@ -9,7 +9,13 @@ Usage:
     python script/export_ckpt.py --ckpt results/xxx/ckpts/ckpt_29999_rank0.pt --data_dir data/xxx
 
     # Disable PLY export, only export poses
-    python script/export_ckpt.py --ckpt results/xxx/ckpts/ckpt_29999_rank0.pt --data_dir data/xxx --no_export_ply
+    python script/export_ckpt.py --ckpt results/xxx/ckpts/ckpt_29999_rank0.pt --data_dir data/xxx --no-export_ply
+
+    # Export COLMAP points3D.txt for re-initialization
+    python script/export_ckpt.py --ckpt results/xxx/ckpts/ckpt_29999_rank0.pt --export_init_points --no-export_ply
+
+    # Reset checkpoint step to 0 for re-training
+    python script/export_ckpt.py --ckpt results/xxx/ckpts/ckpt_29999_rank0.pt --reset_step --no-export_ply --no-export_poses
 """
 
 import argparse
@@ -63,6 +69,55 @@ def do_export_ply(ckpt, output_dir):
         save_to=ply_path,
     )
     print(f"PLY exported to {ply_path} ({len(means)} gaussians)")
+
+
+def do_export_init_points(ckpt, output_dir):
+    """Export Gaussian means + colors as COLMAP points3D.txt for re-initialization.
+
+    This exports xyz positions and RGB colors (converted from SH0) in COLMAP text format.
+    The output can be placed in the sparse/ folder to replace the original points3D.txt,
+    allowing use of trained Gaussians as initialization for a new training run.
+
+    Format: POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] (empty)
+    """
+    splats = ckpt["splats"]
+    means = splats["means"]  # (N, 3)
+
+    if "sh0" not in splats:
+        print("Warning: checkpoint uses appearance model (no sh0). Using gray colors.")
+        colors = np.full((len(means), 3), 128, dtype=np.uint8)
+    else:
+        sh0 = splats["sh0"]  # (N, 1, 3)
+        # Convert SH DC to RGB: rgb = sh * C0 + 0.5, then scale to [0, 255]
+        C0 = 0.28209479177387814
+        if isinstance(sh0, torch.Tensor):
+            sh0 = sh0.numpy()
+        rgb = sh0.squeeze(1) * C0 + 0.5  # (N, 3), range [0, 1]
+        rgb = np.clip(rgb, 0.0, 1.0)
+        colors = (rgb * 255).astype(np.uint8)
+
+    if isinstance(means, torch.Tensor):
+        means = means.numpy()
+    means = means.astype(np.float64)
+
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "points3D.txt")
+
+    n_points = len(means)
+    with open(output_path, "w") as f:
+        f.write("# 3D point list with one line of data per point:\n")
+        f.write("#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n")
+        f.write(f"# Number of points: {n_points}, exported from gsplat checkpoint\n")
+
+        for i in range(n_points):
+            point_id = i + 1
+            x, y, z = means[i]
+            r, g, b = colors[i]
+            error = 0.0  # placeholder
+            # Empty track (no image observations)
+            f.write(f"{point_id} {x:.10f} {y:.10f} {z:.10f} {r} {g} {b} {error:.6f}\n")
+
+    print(f"points3D.txt exported to {output_path} ({n_points} points)")
 
 
 def do_export_poses(ckpt, output_dir, data_dir, test_every):
@@ -213,6 +268,35 @@ def _generate_cameras_txt(colmap_dir, output_path):
             f.write(f"{cam_id} {model_name} {cam.width} {cam.height} {params_str}\n")
 
 
+def do_reset_step(ckpt, output_dir, ckpt_path):
+    """Reset checkpoint step to 0 so it can be used with --ckpt for a fresh training run.
+
+    This preserves all Gaussian parameters (means, scales, quats, opacities, sh0, shN)
+    but resets the step counter, allowing the checkpoint to be used as initialization
+    for a new training session with --ckpt.
+    """
+    old_step = ckpt.get("step", "?")
+    ckpt["step"] = 0
+
+    # Remove pose_adjust and app_module if present (start fresh)
+    if "pose_adjust" in ckpt:
+        del ckpt["pose_adjust"]
+        print("Removed pose_adjust from checkpoint")
+    if "app_module" in ckpt:
+        del ckpt["app_module"]
+        print("Removed app_module from checkpoint")
+
+    os.makedirs(output_dir, exist_ok=True)
+    # Generate output filename
+    base_name = os.path.basename(ckpt_path)
+    name_without_ext = os.path.splitext(base_name)[0]
+    output_path = os.path.join(output_dir, f"{name_without_ext}_reset.pt")
+
+    torch.save(ckpt, output_path)
+    print(f"Checkpoint reset: step {old_step} -> 0")
+    print(f"Saved to {output_path}")
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Export PLY and COLMAP poses from a gsplat checkpoint"
@@ -222,8 +306,12 @@ def main():
                    help="Output directory (default: same directory as .pt file)")
     p.add_argument("--export_ply", action=argparse.BooleanOptionalAction, default=True,
                    help="Export PLY (default: True)")
+    p.add_argument("--export_init_points", action=argparse.BooleanOptionalAction, default=False,
+                   help="Export COLMAP points3D.txt for re-initialization (default: False)")
     p.add_argument("--export_poses", action=argparse.BooleanOptionalAction, default=True,
                    help="Export poses (default: True, requires --data_dir)")
+    p.add_argument("--reset_step", action="store_true", default=False,
+                   help="Reset checkpoint step to 0 for re-training with --ckpt")
     p.add_argument("--data_dir", type=str, default=None,
                    help="COLMAP data directory (required for pose export)")
     p.add_argument("--test_every", type=int, default=8,
@@ -243,8 +331,14 @@ def main():
     if args.export_ply:
         do_export_ply(ckpt, args.output_dir)
 
+    if args.export_init_points:
+        do_export_init_points(ckpt, args.output_dir)
+
     if args.export_poses:
         do_export_poses(ckpt, args.output_dir, args.data_dir, args.test_every)
+
+    if args.reset_step:
+        do_reset_step(ckpt, args.output_dir, args.ckpt)
 
     print("Done.")
 
