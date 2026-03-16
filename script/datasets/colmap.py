@@ -63,6 +63,7 @@ class Parser:
         normalize: bool = False,
         test_every: int = 8,
         mask_dir: Optional[str] = None,  # Path to masks folder (relative to data_dir or absolute)
+        sky_mask_dir: Optional[str] = None,  # Path to sky_mask folder (relative to data_dir or absolute)
     ):
         self.data_dir = data_dir
         self.factor = factor
@@ -82,6 +83,19 @@ class Parser:
 
         if self.mask_dir is not None:
             print(f"[Parser] Using masks from: {self.mask_dir}")
+
+        # Check for sky_mask folder
+        if sky_mask_dir is not None:
+            if os.path.isabs(sky_mask_dir):
+                self.sky_mask_dir = sky_mask_dir
+            else:
+                self.sky_mask_dir = os.path.join(data_dir, sky_mask_dir)
+        else:
+            default_sky_mask_dir = os.path.join(data_dir, "sky_mask")
+            self.sky_mask_dir = default_sky_mask_dir if os.path.exists(default_sky_mask_dir) else None
+
+        if self.sky_mask_dir is not None:
+            print(f"[Parser] Using sky masks from: {self.sky_mask_dir}")
 
         colmap_dir = os.path.join(data_dir, "sparse/0/")
         if not os.path.exists(colmap_dir):
@@ -234,6 +248,25 @@ class Parser:
         else:
             mask_paths = [None] * len(image_names)
 
+        # Build sky_mask paths if sky_mask_dir exists
+        sky_mask_paths = []
+        if self.sky_mask_dir is not None:
+            for image_name in image_names:
+                sky_mask_name = os.path.splitext(image_name)[0] + ".png"
+                sky_mask_path = os.path.join(self.sky_mask_dir, sky_mask_name)
+                if os.path.exists(sky_mask_path):
+                    sky_mask_paths.append(sky_mask_path)
+                else:
+                    sky_mask_path_same_ext = os.path.join(self.sky_mask_dir, image_name)
+                    if os.path.exists(sky_mask_path_same_ext):
+                        sky_mask_paths.append(sky_mask_path_same_ext)
+                    else:
+                        sky_mask_paths.append(None)
+            valid_sky_masks = sum(1 for p in sky_mask_paths if p is not None)
+            print(f"[Parser] Found {valid_sky_masks}/{len(sky_mask_paths)} sky masks.")
+        else:
+            sky_mask_paths = [None] * len(image_names)
+
         # 3D points and {image_name -> [point_idx]}
         points = manager.points3D.astype(np.float32)
         points_err = manager.point3D_errors.astype(np.float32)
@@ -284,6 +317,7 @@ class Parser:
         self.image_names = image_names  # List[str], (num_images,)
         self.image_paths = image_paths  # List[str], (num_images,)
         self.mask_paths = mask_paths  # List[Optional[str]], (num_images,) - external mask paths
+        self.sky_mask_paths = sky_mask_paths  # List[Optional[str]], (num_images,) - sky mask paths (255=sky)
         self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
         self.camera_ids = camera_ids  # List[int], (num_images,)
         self.Ks_dict = Ks_dict  # Dict of camera_id -> K
@@ -430,6 +464,15 @@ class Dataset:
             # Convert to boolean: mask > 0 means valid (use this pixel)
             external_mask = external_mask > 0
 
+        # Load sky mask if available (True = sky pixel)
+        sky_mask = None
+        sky_mask_path = self.parser.sky_mask_paths[index]
+        if sky_mask_path is not None:
+            sky_mask_raw = imageio.imread(sky_mask_path)
+            if sky_mask_raw.ndim == 3:
+                sky_mask_raw = sky_mask_raw[..., 0]
+            sky_mask = sky_mask_raw > 0  # True = sky
+
         if len(params) > 0:
             # Images are distorted. Undistort them.
             mapx, mapy = (
@@ -445,6 +488,11 @@ class Dataset:
                     external_mask.astype(np.uint8), mapx, mapy, cv2.INTER_NEAREST
                 )
                 external_mask = external_mask[y : y + h, x : x + w] > 0
+            if sky_mask is not None:
+                sky_mask = cv2.remap(
+                    sky_mask.astype(np.uint8), mapx, mapy, cv2.INTER_NEAREST
+                )
+                sky_mask = sky_mask[y : y + h, x : x + w] > 0
 
         if self.patch_size is not None:
             # Random crop.
@@ -457,6 +505,8 @@ class Dataset:
             # Also crop external mask if present
             if external_mask is not None:
                 external_mask = external_mask[y : y + self.patch_size, x : x + self.patch_size]
+            if sky_mask is not None:
+                sky_mask = sky_mask[y : y + self.patch_size, x : x + self.patch_size]
 
         data = {
             "K": torch.from_numpy(K).float(),
@@ -477,6 +527,9 @@ class Dataset:
 
         if final_mask is not None:
             data["mask"] = torch.from_numpy(final_mask.copy()).bool()
+
+        if sky_mask is not None:
+            data["sky_mask"] = torch.from_numpy(sky_mask.copy()).bool()
 
         if self.load_depths:
             # projected points to image plane to get depths

@@ -71,7 +71,9 @@ def apply_ground_white_cpu(canvas, covered, R, fx, fy, cx, cy, W, H):
     # d_world = R.T @ d_cam  →  row-vector form: d_cam @ R
     d_world = d_cam @ R  # (H, W, 3)
     looking_down = d_world[..., 2] < 0  # Z-up: negative Z means downward
-    canvas[~covered & looking_down] = 255
+    ground_pixels = ~covered & looking_down
+    canvas[ground_pixels] = 255
+    covered[ground_pixels] = True
 
 
 def render_image_cpu(pts_xyz, colors, R, t, cam, args):
@@ -115,7 +117,8 @@ def render_image_cpu(pts_xyz, colors, R, t, cam, args):
     if args.ground_white:
         apply_ground_white_cpu(canvas, covered, R, fx, fy, cx, cy, W, H)
 
-    return canvas
+    alpha = (covered * 255).astype(np.uint8)
+    return np.dstack([canvas, alpha])
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +136,9 @@ def apply_ground_white_gpu(canvas, covered, R_gpu, fx, fy, cx, cy, W, H, device)
     # d_world = R.T @ d_cam  →  row-vector form: d_cam @ R
     d_world = d_cam @ R_gpu  # (H, W, 3)
     looking_down = d_world[..., 2] < 0
-    canvas[~covered & looking_down] = 255
+    ground_pixels = ~covered & looking_down
+    canvas[ground_pixels] = 255
+    covered[ground_pixels] = True
 
 
 def render_image_gpu(pts, cols, R, t, cam, args):
@@ -203,7 +208,8 @@ def render_image_gpu(pts, cols, R, t, cam, args):
     if args.ground_white:
         apply_ground_white_gpu(canvas, covered, R_gpu, fx, fy, cx, cy, W, H, device)
 
-    return canvas.cpu().numpy()
+    alpha = (covered * 255).to(torch.uint8).unsqueeze(-1)
+    return torch.cat([canvas, alpha], dim=-1).cpu().numpy()
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +267,7 @@ def main():
         name = img.name.replace(".jpg", "").replace(".png", "")
         out_path = os.path.join(args.output_dir, f"{name}.png")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        Image.fromarray(canvas).save(out_path)
+        Image.fromarray(canvas, mode="RGBA").save(out_path)
 
     print(f"\nDone. Output in: {args.output_dir}")
 
