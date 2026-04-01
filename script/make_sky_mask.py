@@ -11,8 +11,11 @@ Pipeline per image:
   3. Compute Z = pixel area of one minimum sphere (5-px cross) after dilation
   4. CC filter: remove components with area < n_factor * Z
      (n_factor=2 means need at least 2 merged spheres → isolated spheres removed)
-  5. Invert: sky=255, non-sky=0
+  5. Invert: sky=255, foreground=0
      (foreground boundary stays expanded from step 2 — conservative for sky mask)
+  6. [optional] Color refinement: among alpha==0 pixels, additionally mark as sky
+     those whose original RGB has large B channel and high overall brightness.
+     Final mask = step-5 mask | color sky pixels.
 
 Usage:
     python make_sky_mask.py \
@@ -22,7 +25,10 @@ Usage:
         [--n_factor 2]         # keep CC with area >= n_factor * Z (default: 2)
         [--kernel_shape ellipse]
         [--save_intermediate]  # also save after dilation, before CC filter
-        [--orig_dir /path/to/original/images]  # if given, save sky-mask overlay images
+        [--orig_dir /path/to/original/images]  # overlay visualization + color sky detection
+        [--sky_color]          # enable color-based sky refinement (requires --orig_dir)
+        [--sky_b_thresh 100]   # B channel threshold for sky color detection (default: 100)
+        [--sky_gray_thresh 100] # grayscale threshold for sky color detection (default: 100)
 """
 
 import argparse
@@ -47,6 +53,12 @@ def parse_args():
     parser.add_argument("--orig_dir", default=None,
                         help="Original camera image directory. If given, save overlay "
                              "visualizations in <output_dir>_overlay/")
+    parser.add_argument("--sky_color", action="store_true",
+                        help="Enable color-based sky refinement (requires --orig_dir)")
+    parser.add_argument("--sky_b_thresh", type=int, default=220,
+                        help="B channel threshold for sky color detection (default: 220)")
+    parser.add_argument("--sky_gray_thresh", type=int, default=200,
+                        help="Grayscale threshold for sky color detection (default: 200)")
     return parser.parse_args()
 
 
@@ -73,13 +85,33 @@ def compute_Z(morph_n, kernel):
     return int((dilated > 0).sum())
 
 
-def process_image(img, morph_n, n_factor, kernel_shape, return_intermediate=False):
+def color_sky_mask(orig_bgr, alpha_zero, b_thresh, gray_thresh):
+    """Among alpha==0 pixels, detect sky by color: large B channel and high brightness.
+
+    Args:
+        orig_bgr:    original image in BGR (H, W, 3) uint8
+        alpha_zero:  bool mask (H, W), True where alpha==0 in projected image
+        b_thresh:    minimum B channel value to consider sky
+        gray_thresh: minimum grayscale value to consider sky
+    Returns:
+        bool mask (H, W), True = sky by color
+    """
+    b = orig_bgr[:, :, 0].astype(np.float32)       # B channel (BGR)
+    gray = orig_bgr.mean(axis=2)                     # overall brightness
+    looks_like_sky = (b > b_thresh) & (gray > gray_thresh)
+    return alpha_zero & looks_like_sky
+
+
+def process_image(img, morph_n, n_factor, kernel_shape, return_intermediate=False,
+                  orig_bgr=None, sky_color=False, sky_b_thresh=100, sky_gray_thresh=100):
     # 1. Binarize: alpha > 0 → 255 (foreground), alpha == 0 → 0 (sky)
     #    Fall back to max(RGB) > 0 for legacy RGB images without alpha channel.
     if img.ndim == 3 and img.shape[2] == 4:
-        fg = (img[:, :, 3] > 0).astype(np.uint8) * 255
+        alpha_zero = img[:, :, 3] == 0  # save for color refinement
+        fg = (~alpha_zero).astype(np.uint8) * 255
     else:
-        fg = (img.max(axis=2) > 0).astype(np.uint8) * 255
+        alpha_zero = img.max(axis=2) == 0
+        fg = (~alpha_zero).astype(np.uint8) * 255
 
     k_n = make_kernel(morph_n, kernel_shape)
 
@@ -103,6 +135,14 @@ def process_image(img, morph_n, n_factor, kernel_shape, return_intermediate=Fals
 
     # 5. Invert: sky=255, foreground=0
     sky_mask = 255 - fg
+
+    # 6. Color refinement: union with color-based sky among alpha==0 pixels
+    if sky_color and orig_bgr is not None:
+        if orig_bgr.shape[:2] != img.shape[:2]:
+            orig_bgr = cv2.resize(orig_bgr, (img.shape[1], img.shape[0]))
+        color_sky = color_sky_mask(orig_bgr, alpha_zero, sky_b_thresh, sky_gray_thresh)
+        sky_mask = np.where(color_sky, np.uint8(255), sky_mask)
+
     return (sky_mask, intermediate) if return_intermediate else sky_mask
 
 
@@ -172,8 +212,17 @@ def main():
 
         rel = os.path.relpath(img_path, args.input_dir)
 
+        orig_bgr = None
+        if args.orig_dir is not None:
+            orig_path = find_orig_image(args.orig_dir, rel)
+            if orig_path is not None:
+                orig_bgr = cv2.imread(orig_path)
+
         result = process_image(img, args.morph_n, args.n_factor, args.kernel_shape,
-                               return_intermediate=args.save_intermediate)
+                               return_intermediate=args.save_intermediate,
+                               orig_bgr=orig_bgr, sky_color=args.sky_color,
+                               sky_b_thresh=args.sky_b_thresh,
+                               sky_gray_thresh=args.sky_gray_thresh)
         if args.save_intermediate:
             sky_mask, intermediate = result
             inter_path = os.path.join(inter_dir, rel)
@@ -187,18 +236,16 @@ def main():
         cv2.imwrite(out_path, sky_mask)
 
         if overlay_dir:
-            orig_path = find_orig_image(args.orig_dir, rel)
-            if orig_path is None:
+            if orig_bgr is None:
                 print(f"  WARNING: no original image found for {rel}, skipping overlay")
             else:
-                orig = cv2.imread(orig_path)
-                if orig is not None:
-                    if orig.shape[:2] != sky_mask.shape[:2]:
-                        orig = cv2.resize(orig, (sky_mask.shape[1], sky_mask.shape[0]))
-                    ov = make_overlay(orig, sky_mask)
-                    ov_path = os.path.join(overlay_dir, rel)
-                    os.makedirs(os.path.dirname(ov_path), exist_ok=True)
-                    cv2.imwrite(ov_path, ov)
+                orig = orig_bgr
+                if orig.shape[:2] != sky_mask.shape[:2]:
+                    orig = cv2.resize(orig, (sky_mask.shape[1], sky_mask.shape[0]))
+                ov = make_overlay(orig, sky_mask)
+                ov_path = os.path.join(overlay_dir, rel)
+                os.makedirs(os.path.dirname(ov_path), exist_ok=True)
+                cv2.imwrite(ov_path, ov)
 
     print(f"\nDone. Masks saved to: {args.output_dir}")
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+import cv2
 import imageio
 import numpy as np
 import torch
@@ -85,7 +86,7 @@ class Config:
     # Also render training images during eval (with pose adjustment applied)
     eval_train: bool = False
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    save_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 30_000])
     # Whether to save ply file (storage size can be large)
     save_ply: bool = False
     # Steps to save the model as ply
@@ -177,10 +178,17 @@ class Config:
     # Weight for depth loss
     depth_lambda: float = 1e-2
 
+    # Sky depth regularization: penalize sky pixels with depth < sky_depth_min
+    sky_depth_reg: float = 0.0
+    # Minimum depth (meters) for sky pixels
+    sky_depth_min: float = 50.0
+
     # Dump information to tensorboard every this steps
     tb_every: int = 100
     # Save training images to tensorboard
     tb_save_image: bool = False
+    # Save debug visualization images every this steps (0 = disabled)
+    vis_every: int = 0
 
     lpips_net: Literal["vgg", "alex"] = "alex"
 
@@ -329,6 +337,10 @@ class Runner:
         os.makedirs(self.stats_dir, exist_ok=True)
         self.render_dir = f"{cfg.result_dir}/renders"
         os.makedirs(self.render_dir, exist_ok=True)
+        self.depth_dir = f"{cfg.result_dir}/depth"
+        os.makedirs(self.depth_dir, exist_ok=True)
+        self.vis_dir = f"{cfg.result_dir}/vis"
+        os.makedirs(self.vis_dir, exist_ok=True)
         self.ply_dir = f"{cfg.result_dir}/ply"
         os.makedirs(self.ply_dir, exist_ok=True)
 
@@ -351,6 +363,20 @@ class Runner:
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
+
+        # Compute sky_depth_min from point cloud max Z height
+        pts = self.parser.points  # (N, 3) in COLMAP world coordinates
+        max_z = float(pts[:, 2].max())
+        self.sky_depth_min = 0.5 * max_z
+        # Sky hemisphere center: (xy_center, z_min) in COLMAP coordinates
+        x_center = float((pts[:, 0].min() + pts[:, 0].max()) / 2)
+        y_center = float((pts[:, 1].min() + pts[:, 1].max()) / 2)
+        z_min = float(pts[:, 2].min())
+        self.sky_hemisphere_center = torch.tensor(
+            [x_center, y_center, z_min], dtype=torch.float32
+        )
+        print(f"Point cloud max Z: {max_z:.3f}, sky_depth_min: {self.sky_depth_min:.3f}")
+        print(f"Sky hemisphere center: [{x_center:.3f}, {y_center:.3f}, {z_min:.3f}], radius threshold: {self.sky_depth_min:.3f}")
 
         # Model
         feature_dim = 32 if cfg.app_opt else None
@@ -641,6 +667,7 @@ class Runner:
             )
             image_ids = data["image_id"].to(device)
             masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
+            sky_masks = data["sky_mask"].to(device) if "sky_mask" in data else None  # [1, H, W], True=sky
             if cfg.depth_loss:
                 points = data["points"].to(device)  # [1, M, 2]
                 depths_gt = data["depths"].to(device)  # [1, M]
@@ -666,7 +693,7 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 image_ids=image_ids,
-                render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+                render_mode="RGB+ED" if (cfg.depth_loss or cfg.sky_depth_reg > 0 or cfg.vis_every > 0) else "RGB",
                 masks=masks,
             )
             if renders.shape[-1] == 4:
@@ -704,11 +731,20 @@ class Runner:
             if masks is not None:
                 # Apply mask for loss calculation
                 # masks shape: [B, H, W], we need [B, H, W, 1] for broadcasting
-                mask_expanded = masks.unsqueeze(-1).float()  # [B, H, W, 1]
+                valid = masks  # [B, H, W], True=valid (non-photographer)
+                mask_expanded = valid.unsqueeze(-1).float()  # [B, H, W, 1]
+
+                # Sky pixels get 0.1 weight, non-sky pixels get 1.0
+                if sky_masks is not None:
+                    weight = torch.where(sky_masks, torch.full_like(masks, 0.1, dtype=torch.float32), torch.ones_like(masks, dtype=torch.float32))
+                    weight = weight * valid.float()  # zero out invalid pixels
+                else:
+                    weight = valid.float()
+                weight_expanded = weight.unsqueeze(-1)  # [B, H, W, 1]
 
                 # For L1 loss: only compute on valid pixels (mask > 0)
                 l1_per_pixel = F.l1_loss(colors, pixels, reduction='none')  # [B, H, W, 3]
-                masked_l1 = l1_per_pixel * mask_expanded  # [B, H, W, 3]
+                masked_l1 = l1_per_pixel * weight_expanded  # [B, H, W, 3]
                 valid_count = mask_expanded.sum() * 3 + 1e-8  # add small epsilon to avoid div by zero
                 l1loss = masked_l1.sum() / valid_count
 
@@ -745,11 +781,26 @@ class Runner:
                 tvloss = 10 * total_variation_loss(self.bil_grids.grids)
                 loss += tvloss
 
+            # Sky depth regularization: push sky gaussians far away
+            sky_depthloss = torch.zeros(1, device=device)
+            if cfg.sky_depth_reg > 0.0 and sky_masks is not None and depths is not None:
+                # depths: [1, H, W, 1], sky_masks: [1, H, W]
+                sky_depth = depths[..., 0][sky_masks]  # [N_sky]
+                if sky_depth.numel() > 0:
+                    sky_depthloss = F.relu(self.sky_depth_min - sky_depth).mean()
+                    loss += cfg.sky_depth_reg * sky_depthloss
+
             # regularizations
             if cfg.opacity_reg > 0.0:
                 loss += cfg.opacity_reg * torch.sigmoid(self.splats["opacities"]).mean()
             if cfg.scale_reg > 0.0:
-                loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
+                if self.sky_hemisphere_center is not None:
+                    with torch.no_grad():
+                        dist = torch.norm(self.splats["means"] - self.sky_hemisphere_center.to(self.device), dim=-1)
+                        ground_mask = dist <= self.sky_depth_min
+                    loss += cfg.scale_reg * torch.exp(self.splats["scales"])[ground_mask].mean()
+                else:
+                    loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
 
             loss.backward()
 
@@ -780,6 +831,8 @@ class Runner:
                 self.writer.add_scalar("train/mem", mem, step)
                 if cfg.depth_loss:
                     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+                if cfg.sky_depth_reg > 0.0:
+                    self.writer.add_scalar("train/sky_depthloss", sky_depthloss.item(), step)
                 if cfg.use_bilateral_grid:
                     self.writer.add_scalar("train/tvloss", tvloss.item(), step)
                 if cfg.tb_save_image:
@@ -787,6 +840,35 @@ class Runner:
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
                     self.writer.add_image("train/render", canvas, step)
                 self.writer.flush()
+
+            # save debug visualization
+            if world_rank == 0 and cfg.vis_every > 0 and step % cfg.vis_every == 0:
+                with torch.no_grad():
+                    # Input image: [H, W, 3] uint8
+                    img_np = (pixels[0].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+
+                    # Sky mask: [H, W] -> [H, W, 3] gray
+                    if sky_masks is not None:
+                        sky_np = (sky_masks[0].cpu().numpy().astype(np.uint8) * 255)
+                        sky_np = np.stack([sky_np] * 3, axis=-1)
+                    else:
+                        sky_np = np.zeros_like(img_np)
+
+                    # Rendered RGB: [H, W, 3] uint8
+                    rgb_np = (colors[0].detach().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+
+                    # Rendered depth: [H, W, 3] colormap (0-128m range)
+                    if depths is not None:
+                        d = depths[0, :, :, 0].detach().cpu().numpy()
+                        d_vis = (np.clip(d / max(d.max(), 1e-6), 0, 1) * 255).astype(np.uint8)
+                        d_color = cv2.applyColorMap(d_vis, cv2.COLORMAP_PLASMA)
+                        depth_np = cv2.cvtColor(d_color, cv2.COLOR_BGR2RGB)
+                    else:
+                        depth_np = np.zeros_like(img_np)
+
+                    canvas = np.concatenate([img_np, sky_np, rgb_np, depth_np], axis=1)
+                    out_path = f"{self.vis_dir}/step_{step:07d}.jpg"
+                    imageio.imwrite(out_path, canvas)
 
             # save checkpoint before updating the model
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
@@ -897,6 +979,15 @@ class Runner:
 
             # Run post-backward steps after backward and optimizer
             if isinstance(self.cfg.strategy, DefaultStrategy):
+                # Before reset: save sky Gaussian opacities so reset won't affect them
+                is_reset_step = (step % self.cfg.strategy.reset_every == 0 and step > 0)
+                if is_reset_step:
+                    with torch.no_grad():
+                        center = self.sky_hemisphere_center.to(device)
+                        dist = torch.norm(self.splats["means"] - center, dim=-1)
+                        sky_gs_mask_pre = dist > self.sky_depth_min
+                        saved_sky_opa_mean = self.splats["opacities"][sky_gs_mask_pre].mean().item()
+
                 self.cfg.strategy.step_post_backward(
                     params=self.splats,
                     optimizers=self.optimizers,
@@ -904,7 +995,18 @@ class Runner:
                     step=step,
                     info=info,
                     packed=cfg.packed,
+                    sky_center=self.sky_hemisphere_center,
+                    sky_radius=self.sky_depth_min,
                 )
+
+                # After reset: recompute mask on updated splats and restore sky opacities
+                if is_reset_step:
+                    with torch.no_grad():
+                        center = self.sky_hemisphere_center.to(device)
+                        dist = torch.norm(self.splats["means"] - center, dim=-1)
+                        sky_gs_mask_post = dist > self.sky_depth_min
+                        if sky_gs_mask_post.any():
+                            self.splats["opacities"].data[sky_gs_mask_post] = saved_sky_opa_mean
             elif isinstance(self.cfg.strategy, MCMCStrategy):
                 self.cfg.strategy.step_post_backward(
                     params=self.splats,
@@ -972,7 +1074,7 @@ class Runner:
         )
         ellipse_time = 0
         metrics = defaultdict(list)
-        for i, data in enumerate(dataloader):
+        for i, data in enumerate(tqdm.tqdm(dataloader, desc=f"Eval {stage}")):
             camtoworlds = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
@@ -986,7 +1088,7 @@ class Runner:
 
             torch.cuda.synchronize()
             tic = time.time()
-            colors, _, _ = self.rasterize_splats(
+            renders, _, _ = self.rasterize_splats(
                 camtoworlds=camtoworlds,
                 Ks=Ks,
                 width=width,
@@ -996,20 +1098,34 @@ class Runner:
                 far_plane=cfg.far_plane,
                 masks=masks,
                 image_ids=image_ids if stage == "train" else None,
-            )  # [1, H, W, 3]
+                render_mode="RGB+ED",
+            )  # [1, H, W, 4]
             torch.cuda.synchronize()
             ellipse_time += max(time.time() - tic, 1e-10)
 
-            colors = torch.clamp(colors, 0.0, 1.0)
-            canvas_list = [pixels, colors]
+            colors = torch.clamp(renders[..., :3], 0.0, 1.0)  # [1, H, W, 3]
+            depths = renders[..., 3:4]  # [1, H, W, 1]
 
             if world_rank == 0:
-                # write images
-                canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+                # depth colormap visualization (same as vis_every)
+                d = depths[0, :, :, 0].cpu().numpy()  # [H, W]
+                d_vis = (np.clip(d / max(d.max(), 1e-6), 0, 1) * 255).astype(np.uint8)
+                d_color = cv2.applyColorMap(d_vis, cv2.COLORMAP_PLASMA)
+                depth_np = cv2.cvtColor(d_color, cv2.COLOR_BGR2RGB)  # [H, W, 3]
+
+                # write RGB canvas (GT | render) and depth colormap side by side
+                canvas = torch.cat([pixels, colors], dim=2).squeeze(0).cpu().numpy()
                 canvas = (canvas * 255).astype(np.uint8)
+                canvas = np.concatenate([canvas, depth_np], axis=1)
                 imageio.imwrite(
                     f"{self.render_dir}/{stage}_step{step}_{i:04d}.png",
                     canvas,
+                )
+
+                # write raw depth as npy
+                np.save(
+                    f"{self.depth_dir}/{stage}_step{step}_{i:04d}_depth.npy",
+                    d,
                 )
 
                 pixels_p = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]

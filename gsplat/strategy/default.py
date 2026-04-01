@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 from typing_extensions import Literal
@@ -92,6 +92,8 @@ class DefaultStrategy(Strategy):
     revised_opacity: bool = False
     verbose: bool = False
     key_for_gradient: Literal["means2d", "gradient_2dgs"] = "means2d"
+    max_sky_frac: float = 0.1
+    max_gs: int = 16_000_000
 
     def initialize_state(self, scene_scale: float = 1.0) -> Dict[str, Any]:
         """Initialize and return the running state for this strategy.
@@ -157,8 +159,17 @@ class DefaultStrategy(Strategy):
         step: int,
         info: Dict[str, Any],
         packed: bool = False,
+        sky_center: Optional[Any] = None,
+        sky_radius: float = 0.0,
     ):
-        """Callback function to be executed after the `loss.backward()` call."""
+        """Callback function to be executed after the `loss.backward()` call.
+
+        Args:
+            sky_center: Optional tensor [3] specifying the sky hemisphere center.
+                        Gaussians whose distance to this center exceeds sky_radius
+                        are treated as sky and excluded from pruning.
+            sky_radius: Distance threshold to identify sky Gaussians.
+        """
         if step >= self.refine_stop_iter:
             return
 
@@ -169,20 +180,41 @@ class DefaultStrategy(Strategy):
             and step % self.refine_every == 0
             and step % self.reset_every >= self.pause_refine_after_reset
         ):
-            # grow GSs
-            n_dupli, n_split = self._grow_gs(params, optimizers, state, step)
+            # grow GSs (skip if already at soft cap)
+            n_dupli, n_split = 0, 0
+            if self.max_gs <= 0 or len(params["means"]) < self.max_gs:
+                n_dupli, n_split = self._grow_gs(params, optimizers, state, step)
             if self.verbose:
                 print(
                     f"Step {step}: {n_dupli} GSs duplicated, {n_split} GSs split. "
                     f"Now having {len(params['means'])} GSs."
                 )
 
-            # prune GSs
-            n_prune = self._prune_gs(params, optimizers, state, step)
+            # Compute sky protect mask after grow (indices may have changed)
+            protect_mask = None
+            if sky_center is not None and sky_radius > 0:
+                with torch.no_grad():
+                    dist = torch.norm(params["means"] - sky_center.to(params["means"].device), dim=-1)
+                    protect_mask = dist > sky_radius
+
+            # prune GSs (sky Gaussians are protected from scale pruning)
+            n_prune = self._prune_gs(params, optimizers, state, step, protect_mask=protect_mask)
+
+            # cap sky Gaussians to max_sky_frac of total
+            n_sky_pruned = 0
+            if protect_mask is not None and self.max_sky_frac > 0:
+                # recompute protect_mask after pruning (indices changed)
+                with torch.no_grad():
+                    dist = torch.norm(params["means"] - sky_center.to(params["means"].device), dim=-1)
+                    protect_mask = dist > sky_radius
+                n_sky_pruned = self._cap_sky_gs(params, optimizers, state, protect_mask)
+
             if self.verbose:
+                n_sky = int(protect_mask.sum().item()) if protect_mask is not None else 0
                 print(
-                    f"Step {step}: {n_prune} GSs pruned. "
-                    f"Now having {len(params['means'])} GSs."
+                    f"Step {step}: {n_prune} GSs pruned ({n_sky_pruned} sky capped). "
+                    f"Now having {len(params['means'])} GSs "
+                    f"(sky: {n_sky})."
                 )
 
             # reset running stats
@@ -315,8 +347,10 @@ class DefaultStrategy(Strategy):
         optimizers: Dict[str, torch.optim.Optimizer],
         state: Dict[str, Any],
         step: int,
+        protect_mask: Optional[Any] = None,
     ) -> int:
-        is_prune = torch.sigmoid(params["opacities"].flatten()) < self.prune_opa
+        is_low_opa = torch.sigmoid(params["opacities"].flatten()) < self.prune_opa
+        is_prune = is_low_opa
         if step > self.reset_every:
             is_too_big = (
                 torch.exp(params["scales"]).max(dim=-1).values
@@ -330,6 +364,10 @@ class DefaultStrategy(Strategy):
             if step < self.refine_scale2d_stop_iter:
                 is_too_big |= state["radii"] > self.prune_scale2d
 
+            # Sky Gaussians: skip scale pruning, only prune by opacity
+            if protect_mask is not None:
+                is_too_big = is_too_big & ~protect_mask
+
             is_prune = is_prune | is_too_big
 
         n_prune = is_prune.sum().item()
@@ -337,3 +375,31 @@ class DefaultStrategy(Strategy):
             remove(params=params, optimizers=optimizers, state=state, mask=is_prune)
 
         return n_prune
+
+    @torch.no_grad()
+    def _cap_sky_gs(
+        self,
+        params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
+        optimizers: Dict[str, torch.optim.Optimizer],
+        state: Dict[str, Any],
+        sky_mask: torch.Tensor,
+    ) -> int:
+        n_total = len(params["means"])
+        n_sky = int(sky_mask.sum().item())
+        max_sky = int(n_total * self.max_sky_frac)
+        if n_sky <= max_sky:
+            return 0
+
+        n_remove = n_sky - max_sky
+        # Among sky Gaussians, find those with lowest opacity
+        opacities = torch.sigmoid(params["opacities"].flatten())
+        sky_indices = torch.where(sky_mask)[0]
+        sky_opas = opacities[sky_indices]
+        # Sort by opacity ascending, take the n_remove lowest
+        _, order = sky_opas.sort()
+        remove_indices = sky_indices[order[:n_remove]]
+
+        is_remove = torch.zeros(n_total, dtype=torch.bool, device=sky_mask.device)
+        is_remove[remove_indices] = True
+        remove(params=params, optimizers=optimizers, state=state, mask=is_remove)
+        return n_remove
