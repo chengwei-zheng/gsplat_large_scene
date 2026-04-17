@@ -56,6 +56,8 @@ class Config:
 
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
+    # Name of the images folder inside data_dir
+    image_folder: str = "images"
     # Downsample factor for the dataset
     data_factor: int = 4
     # Directory to save results
@@ -353,6 +355,7 @@ class Runner:
             factor=cfg.data_factor,
             normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
+            image_folder=cfg.image_folder,
         )
         self.trainset = Dataset(
             self.parser,

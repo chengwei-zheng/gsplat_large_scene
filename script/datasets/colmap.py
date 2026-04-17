@@ -64,6 +64,7 @@ class Parser:
         test_every: int = 8,
         mask_dir: Optional[str] = None,  # Path to masks folder (relative to data_dir or absolute)
         sky_mask_dir: Optional[str] = None,  # Path to sky_mask folder (relative to data_dir or absolute)
+        image_folder: str = "images",  # Name of the images folder inside data_dir
     ):
         self.data_dir = data_dir
         self.factor = factor
@@ -209,8 +210,8 @@ class Parser:
             image_dir_suffix = f"_{factor}"
         else:
             image_dir_suffix = ""
-        colmap_image_dir = os.path.join(data_dir, "images")
-        image_dir = os.path.join(data_dir, "images" + image_dir_suffix)
+        colmap_image_dir = os.path.join(data_dir, image_folder)
+        image_dir = os.path.join(data_dir, image_folder + image_dir_suffix)
         for d in [image_dir, colmap_image_dir]:
             if not os.path.exists(d):
                 raise ValueError(f"Image folder {d} does not exist.")

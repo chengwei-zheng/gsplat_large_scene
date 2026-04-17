@@ -1,0 +1,10 @@
+{
+  "hue_lo": 120,
+  "hue_hi": 160,
+  "sat_thresh": 80,
+  "val_thresh": 210,
+  "strength": 60,
+  "darken": 50,
+  "r_scale": 1000,
+  "b_scale": 1000
+}

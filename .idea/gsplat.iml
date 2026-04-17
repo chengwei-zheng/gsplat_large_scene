@@ -4,6 +4,7 @@
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/examples/data" />
       <excludeFolder url="file://$MODULE_DIR$/examples/datasets" />
+      <excludeFolder url="file://$MODULE_DIR$/script/results" />
     </content>
     <orderEntry type="jdk" jdkName="$USER_HOME$/miniconda3/envs/gsplat" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

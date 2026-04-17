@@ -78,6 +78,111 @@ def read_las(las_path):
     return points, colors
 
 
+def read_ply(ply_path):
+    """Read PLY file and return xyz coordinates and RGB colors.
+
+    Supports binary_little_endian and ASCII formats.
+    Color properties: red/green/blue or r/g/b (uint8 or uint16).
+
+    Returns:
+        points: (N, 3) float64 array of xyz coordinates
+        colors: (N, 3) uint8 array of RGB colors, or gray if not available
+    """
+    print(f"Reading PLY file: {ply_path}")
+
+    with open(ply_path, "rb") as f:
+        # Parse header
+        header_lines = []
+        while True:
+            line = f.readline().decode("ascii", errors="replace").strip()
+            header_lines.append(line)
+            if line == "end_header":
+                break
+
+        # Determine format and vertex count
+        fmt = "ascii"
+        for hl in header_lines:
+            if hl.startswith("format"):
+                fmt = hl.split()[1]  # ascii / binary_little_endian / binary_big_endian
+
+        n_vertices = 0
+        for hl in header_lines:
+            if hl.startswith("element vertex"):
+                n_vertices = int(hl.split()[-1])
+                break
+
+        # Parse properties in order
+        in_vertex = False
+        props = []  # list of (name, dtype_str)
+        for hl in header_lines:
+            if hl.startswith("element vertex"):
+                in_vertex = True
+                continue
+            if hl.startswith("element") and not hl.startswith("element vertex"):
+                in_vertex = False
+            if in_vertex and hl.startswith("property"):
+                parts = hl.split()
+                dtype_str, prop_name = parts[1], parts[2]
+                props.append((prop_name, dtype_str))
+
+        # Map PLY type strings to numpy dtypes
+        _dtype_map = {
+            "float": np.float32, "float32": np.float32,
+            "double": np.float64, "float64": np.float64,
+            "uchar": np.uint8, "uint8": np.uint8,
+            "ushort": np.uint16, "uint16": np.uint16,
+            "int": np.int32, "int32": np.int32,
+            "uint": np.uint32, "uint32": np.uint32,
+            "short": np.int16, "int16": np.int16,
+            "char": np.int8, "int8": np.int8,
+        }
+        prop_dtypes = [(name, _dtype_map.get(dt, np.float32)) for name, dt in props]
+
+        if fmt == "ascii":
+            data_lines = [f.readline().decode("ascii").strip() for _ in range(n_vertices)]
+            rows = [list(map(float, l.split())) for l in data_lines]
+            raw = np.array(rows, dtype=np.float64)
+            prop_values = {name: raw[:, i].astype(dt)
+                           for i, (name, dt) in enumerate(prop_dtypes)}
+        else:  # binary_little_endian / binary_big_endian
+            byte_order = "<" if "little" in fmt else ">"
+            struct_dtype = np.dtype([(name, byte_order + np.dtype(dt).str[1:])
+                                     for name, dt in prop_dtypes])
+            raw = np.frombuffer(f.read(n_vertices * struct_dtype.itemsize), dtype=struct_dtype)
+            prop_values = {name: raw[name] for name, _ in prop_dtypes}
+
+    # Extract XYZ
+    points = np.stack([
+        prop_values["x"].astype(np.float64),
+        prop_values["y"].astype(np.float64),
+        prop_values["z"].astype(np.float64),
+    ], axis=-1)
+    print(f"Loaded {len(points)} points")
+
+    # Extract RGB (try red/green/blue, then r/g/b)
+    def _get_color(names):
+        for n in names:
+            if n in prop_values:
+                arr = prop_values[n]
+                if arr.dtype == np.uint16:
+                    arr = (arr / 256).astype(np.uint8)
+                return arr.astype(np.uint8)
+        return None
+
+    r = _get_color(["red", "r"])
+    g = _get_color(["green", "g"])
+    b = _get_color(["blue", "b"])
+
+    if r is not None and g is not None and b is not None:
+        colors = np.stack([r, g, b], axis=-1)
+        print("RGB colors found")
+    else:
+        print("No RGB colors in PLY file, using gray (128, 128, 128)")
+        colors = np.full((len(points), 3), 128, dtype=np.uint8)
+
+    return points, colors
+
+
 def read_points3d_txt(txt_path):
     """Read COLMAP points3D.txt and return xyz coordinates and RGB colors.
 
@@ -230,10 +335,12 @@ def read_point_cloud(file_path):
 
     if ext in [".las", ".laz"]:
         return read_las(file_path)
+    elif ext == ".ply":
+        return read_ply(file_path)
     elif ext == ".txt" or name.startswith("points3d"):
         return read_points3d_txt(file_path)
     else:
-        raise ValueError(f"Unsupported format: {ext}. Supported: .las, .laz, .txt (points3D)")
+        raise ValueError(f"Unsupported format: {ext}. Supported: .las, .laz, .ply, .txt (points3D)")
 
 
 def merge_point_clouds(file_paths):
@@ -315,15 +422,18 @@ def main():
         if input_ext in [".las", ".laz"]:
             points, colors = read_las(args.input)
             base_name = os.path.splitext(os.path.basename(args.input))[0]
+        elif input_ext == ".ply":
+            points, colors = read_ply(args.input)
+            base_name = os.path.splitext(os.path.basename(args.input))[0]
         elif input_ext == ".txt" or input_name.startswith("points3d"):
             points, colors = read_points3d_txt(args.input)
             base_name = "points3D"
             # If input is points3D.txt, skip exporting points3D.txt by default
             if args.export_points3d and input_name.startswith("points3d"):
-                print("Input is points3D.txt, skipping points3D.txt     export")
+                print("Input is points3D.txt, skipping points3D.txt export")
                 args.export_points3d = False
         else:
-            raise ValueError(f"Unsupported input format: {input_ext}. Supported: .las, .laz, .txt (points3D)")
+            raise ValueError(f"Unsupported input format: {input_ext}. Supported: .las, .laz, .ply, .txt (points3D)")
 
     # Subsample if requested
     if args.subsample is not None and args.subsample > 1:

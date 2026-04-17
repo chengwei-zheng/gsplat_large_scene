@@ -178,6 +178,8 @@ def render_image_gpu(pts, cols, R, t, cam, args):
         order = torch.argsort(z, descending=True)
         u, v, z, radii, cols_v = u[order], v[order], z[order], radii[order], cols_v[order]
 
+        if radii.numel() == 0:
+            raise RuntimeError(f"No points projected into view. Check that the point cloud and camera poses are in the same coordinate system.")
         max_r = int(radii.max().item())
 
         # Loop over offsets (small: ~pi*max_r^2 iters), vectorize over points
@@ -267,7 +269,7 @@ def main():
         name = img.name.replace(".jpg", "").replace(".png", "")
         out_path = os.path.join(args.output_dir, f"{name}.png")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        Image.fromarray(canvas, mode="RGBA").save(out_path)
+        Image.fromarray(canvas).save(out_path)
 
     print(f"\nDone. Output in: {args.output_dir}")
 
