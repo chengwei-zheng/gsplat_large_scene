@@ -19,8 +19,8 @@ colmap model_converter \
     --output_type BIN
 
 colmap model_converter \
-    --input_path /home/yiinqiang/SMBC/data/FJD_P2_Forest_colmap/self-implementation_from_triangulator/sparse/0 \
-    --output_path /home/yiinqiang/SMBC/data/FJD_P2_Forest_colmap/self-implementation_from_triangulator/sparse/0 \
+    --input_path /home/yiinqiang/SMBC/data/Forest_hinoki_260413_L2PRO/perspective/sparse_LAS/0 \
+    --output_path /home/yiinqiang/SMBC/data/Forest_hinoki_260413_L2PRO/perspective/sparse_LAS/0 \
     --output_type BIN
 
 
@@ -64,7 +64,7 @@ CUDA_VISIBLE_DEVICES=3 python simple_trainer.py default \
 CUDA_VISIBLE_DEVICES=3 python simple_trainer.py default \
     --data_dir /home/yiinqiang/SMBC/data/tanashi-peach1_20251129-124511_k1/temp_1110/perspective \
     --data_factor 1 \
-    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_MyCMR_opti_skyLAS20x_step40x_SH2_global03_skyOPrune01Cap_grow015_SReg \
+    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_MyCMR_opti_skyLAS20x_step40x_SH2_global03_sky01Cap_grow012_SReg005 \
     --steps_scaler 40.0 \
     --pose_opt \
     --test_every 0 \
@@ -72,9 +72,25 @@ CUDA_VISIBLE_DEVICES=3 python simple_trainer.py default \
     --global_scale 0.3 \
     --sky_depth_reg 0.1 \
     --vis_every 2000 \
-    --strategy.grow_grad2d 0.000015 \
+    --strategy.grow_grad2d 0.000012 \
     --strategy.grow_scale3d 0.002 \
-    --scale_reg 0.01
+    --scale_reg 0.05
+
+CUDA_VISIBLE_DEVICES=1 python simple_trainer.py default \
+    --data_dir /home/yiinqiang/SMBC/data/Forest_hinoki_260413_L2PRO/perspective \
+    --data_factor 1 \
+    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_skyLAS20x_step40x_SH2_global03_sky01Cap_grow02_SReg005_NoSkyMask \
+    --steps_scaler 40.0 \
+    --pose_opt \
+    --test_every 0 \
+    --sh_degree 2 \
+    --global_scale 0.3 \
+    --sky_depth_reg 0.1 \
+    --vis_every 2000 \
+    --strategy.grow_grad2d 0.00002 \
+    --strategy.grow_scale3d 0.002 \
+    --scale_reg 0.05 \
+    --init_scale 0.3
 
 CUDA_VISIBLE_DEVICES=3 python simple_trainer.py default \
     --data_dir /home/yiinqiang/SMBC/data/Forest_Karamatsu_plot2/perspective \
@@ -93,16 +109,6 @@ CUDA_VISIBLE_DEVICES=3 python simple_trainer.py default \
     --scale_reg 0.01 \
     --init_scale 0.3
 
-    --eval_train
-
-CUDA_VISIBLE_DEVICES=3 python simple_trainer.py default \
-    --data_dir /home/yiinqiang/SMBC/data/FJD_P2_Forest_colmap/self-implementation_from_triangulator \
-    --data_factor 1 \
-    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/FJD_P2_Forest_RawCMR_opti_step40x \
-    --resume /home/yiinqiang/SMBC/gsplat/results_RawCMR/FJD_P2_Forest_RawCMR_opti_step40x/ckpts/ckpt_1199999_rank0.pt \
-    --steps_scaler 40.0001 \
-    --pose_opt \
-    --test_every 0 \
     --eval_train
 
 CUDA_VISIBLE_DEVICES=3 python simple_trainer.py default \

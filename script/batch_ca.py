@@ -27,8 +27,14 @@ def process(img, p, return_mask=False):
 
     img_hsv = cv2.cvtColor(img_ca, cv2.COLOR_BGR2HSV).astype(np.float32)
     hh, s, v = cv2.split(img_hsv)
-    mask = ((hh >= p["hue_lo"]) & (hh <= p["hue_hi"]) &
-            (s > p["sat_thresh"]) & (v < p.get("val_thresh", 150))).astype(np.float32)
+
+    m = max(p.get("margin", 30), 1)
+    hue_mask = np.clip((hh - p["hue_lo"]) / m, 0.0, 1.0) * \
+               np.clip((p["hue_hi"] - hh) / m, 0.0, 1.0)
+    s_mask   = np.clip((s - p["sat_thresh"]) / m, 0.0, 1.0)
+    v_mask   = np.clip((p.get("val_thresh", 150) - v) / m, 0.0, 1.0)
+
+    mask = hue_mask * s_mask * v_mask
     mask = cv2.GaussianBlur(mask, (3, 3), 0)
     alpha = mask * (p["strength"] / 100.0)
     s -= s * alpha

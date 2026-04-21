@@ -64,7 +64,9 @@ class Parser:
         test_every: int = 8,
         mask_dir: Optional[str] = None,  # Path to masks folder (relative to data_dir or absolute)
         sky_mask_dir: Optional[str] = None,  # Path to sky_mask folder (relative to data_dir or absolute)
+        ca_mask_dir: Optional[str] = None,  # Path to CA (purple fringe) mask folder; grayscale, 255=strong fringe
         image_folder: str = "images",  # Name of the images folder inside data_dir
+        sparse_folder: str = "sparse",  # Name of the sparse folder inside data_dir
     ):
         self.data_dir = data_dir
         self.factor = factor
@@ -98,9 +100,16 @@ class Parser:
         if self.sky_mask_dir is not None:
             print(f"[Parser] Using sky masks from: {self.sky_mask_dir}")
 
-        colmap_dir = os.path.join(data_dir, "sparse/0/")
+        # Check for CA mask folder (folder name relative to data_dir)
+        if ca_mask_dir is not None:
+            self.ca_mask_dir = os.path.join(data_dir, ca_mask_dir)
+            print(f"[Parser] Using CA masks from: {self.ca_mask_dir}")
+        else:
+            self.ca_mask_dir = None
+
+        colmap_dir = os.path.join(data_dir, sparse_folder, "0")
         if not os.path.exists(colmap_dir):
-            colmap_dir = os.path.join(data_dir, "sparse")
+            colmap_dir = os.path.join(data_dir, sparse_folder)
         assert os.path.exists(
             colmap_dir
         ), f"COLMAP directory {colmap_dir} does not exist."
@@ -268,6 +277,22 @@ class Parser:
         else:
             sky_mask_paths = [None] * len(image_names)
 
+        # Build CA mask paths if ca_mask_dir exists
+        ca_mask_paths = []
+        if self.ca_mask_dir is not None:
+            for image_name in image_names:
+                ca_mask_name = os.path.splitext(image_name)[0] + ".png"
+                ca_mask_path = os.path.join(self.ca_mask_dir, ca_mask_name)
+                if os.path.exists(ca_mask_path):
+                    ca_mask_paths.append(ca_mask_path)
+                else:
+                    ca_mask_path_same_ext = os.path.join(self.ca_mask_dir, image_name)
+                    ca_mask_paths.append(ca_mask_path_same_ext if os.path.exists(ca_mask_path_same_ext) else None)
+            valid_ca_masks = sum(1 for p in ca_mask_paths if p is not None)
+            print(f"[Parser] Found {valid_ca_masks}/{len(ca_mask_paths)} CA masks.")
+        else:
+            ca_mask_paths = [None] * len(image_names)
+
         # 3D points and {image_name -> [point_idx]}
         points = manager.points3D.astype(np.float32)
         points_err = manager.point3D_errors.astype(np.float32)
@@ -319,6 +344,7 @@ class Parser:
         self.image_paths = image_paths  # List[str], (num_images,)
         self.mask_paths = mask_paths  # List[Optional[str]], (num_images,) - external mask paths
         self.sky_mask_paths = sky_mask_paths  # List[Optional[str]], (num_images,) - sky mask paths (255=sky)
+        self.ca_mask_paths = ca_mask_paths  # List[Optional[str]], (num_images,) - CA mask paths (grayscale float weight)
         self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
         self.camera_ids = camera_ids  # List[int], (num_images,)
         self.Ks_dict = Ks_dict  # Dict of camera_id -> K
@@ -474,6 +500,15 @@ class Dataset:
                 sky_mask_raw = sky_mask_raw[..., 0]
             sky_mask = sky_mask_raw > 0  # True = sky
 
+        # Load CA mask if available (float [0,1], 1=strong purple fringe)
+        ca_mask = None
+        ca_mask_path = self.parser.ca_mask_paths[index]
+        if ca_mask_path is not None:
+            ca_mask_raw = imageio.imread(ca_mask_path)
+            if ca_mask_raw.ndim == 3:
+                ca_mask_raw = ca_mask_raw[..., 0]
+            ca_mask = ca_mask_raw.astype(np.float32) / 255.0  # [0, 1]
+
         if len(params) > 0:
             # Images are distorted. Undistort them.
             mapx, mapy = (
@@ -494,6 +529,9 @@ class Dataset:
                     sky_mask.astype(np.uint8), mapx, mapy, cv2.INTER_NEAREST
                 )
                 sky_mask = sky_mask[y : y + h, x : x + w] > 0
+            if ca_mask is not None:
+                ca_mask = cv2.remap(ca_mask, mapx, mapy, cv2.INTER_LINEAR)
+                ca_mask = ca_mask[y : y + h, x : x + w]
 
         if self.patch_size is not None:
             # Random crop.
@@ -508,6 +546,8 @@ class Dataset:
                 external_mask = external_mask[y : y + self.patch_size, x : x + self.patch_size]
             if sky_mask is not None:
                 sky_mask = sky_mask[y : y + self.patch_size, x : x + self.patch_size]
+            if ca_mask is not None:
+                ca_mask = ca_mask[y : y + self.patch_size, x : x + self.patch_size]
 
         data = {
             "K": torch.from_numpy(K).float(),
@@ -531,6 +571,9 @@ class Dataset:
 
         if sky_mask is not None:
             data["sky_mask"] = torch.from_numpy(sky_mask.copy()).bool()
+
+        if ca_mask is not None:
+            data["ca_mask"] = torch.from_numpy(ca_mask.copy()).float()
 
         if self.load_depths:
             # projected points to image plane to get depths

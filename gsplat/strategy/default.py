@@ -161,6 +161,7 @@ class DefaultStrategy(Strategy):
         packed: bool = False,
         sky_center: Optional[Any] = None,
         sky_radius: float = 0.0,
+        z_floor: Optional[float] = None,
     ):
         """Callback function to be executed after the `loss.backward()` call.
 
@@ -169,6 +170,7 @@ class DefaultStrategy(Strategy):
                         Gaussians whose distance to this center exceeds sky_radius
                         are treated as sky and excluded from pruning.
             sky_radius: Distance threshold to identify sky Gaussians.
+            z_floor: Optional Z coordinate below which Gaussians are pruned.
         """
         if step >= self.refine_stop_iter:
             return
@@ -209,10 +211,19 @@ class DefaultStrategy(Strategy):
                     protect_mask = dist > sky_radius
                 n_sky_pruned = self._cap_sky_gs(params, optimizers, state, protect_mask)
 
+            # prune underground Gaussians
+            n_underground = 0
+            if z_floor is not None:
+                with torch.no_grad():
+                    is_underground = params["means"][:, 2] < z_floor
+                n_underground = int(is_underground.sum().item())
+                if n_underground > 0:
+                    remove(params=params, optimizers=optimizers, state=state, mask=is_underground)
+
             if self.verbose:
                 n_sky = int(protect_mask.sum().item()) if protect_mask is not None else 0
                 print(
-                    f"Step {step}: {n_prune} GSs pruned ({n_sky_pruned} sky capped). "
+                    f"Step {step}: {n_prune} GSs pruned ({n_sky_pruned} sky capped, {n_underground} underground). "
                     f"Now having {len(params['means'])} GSs "
                     f"(sky: {n_sky})."
                 )

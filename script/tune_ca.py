@@ -23,6 +23,7 @@ DEFAULT = dict(
     hue_hi=160,
     sat_thresh=30,
     val_thresh=150,  # only correct pixels darker than this (0-255)
+    margin=30,       # transition width for soft thresholds (S and V)
     strength=90,
     darken=30,       # also reduce V by this % when correcting (0=no darkening)
     r_scale=1000,
@@ -53,8 +54,14 @@ def process(img, p):
 
     img_hsv = cv2.cvtColor(img_ca, cv2.COLOR_BGR2HSV).astype(np.float32)
     hh, s, v = cv2.split(img_hsv)
-    mask = ((hh >= p["hue_lo"]) & (hh <= p["hue_hi"]) &
-            (s > p["sat_thresh"]) & (v < p["val_thresh"])).astype(np.float32)
+
+    m = max(p.get("margin", 30), 1)
+    hue_mask = np.clip((hh - p["hue_lo"]) / m, 0.0, 1.0) * \
+               np.clip((p["hue_hi"] - hh) / m, 0.0, 1.0)
+    s_mask   = np.clip((s - p["sat_thresh"]) / m, 0.0, 1.0)
+    v_mask   = np.clip((p["val_thresh"] - v) / m, 0.0, 1.0)
+
+    mask = hue_mask * s_mask * v_mask
     mask = cv2.GaussianBlur(mask, (3, 3), 0)
     alpha = mask * (p["strength"] / 100.0)
     s -= s * alpha
@@ -96,6 +103,7 @@ def main():
     cv2.createTrackbar("Hue High",   win, params["hue_hi"],      179, nothing)
     cv2.createTrackbar("Sat Thresh", win, params["sat_thresh"],  255, nothing)
     cv2.createTrackbar("Val Thresh", win, params["val_thresh"],  255, nothing)
+    cv2.createTrackbar("Margin",     win, params["margin"],      100, nothing)
     cv2.createTrackbar("Strength",   win, params["strength"],    100, nothing)
     cv2.createTrackbar("Darken",     win, params["darken"],      100, nothing)
     cv2.createTrackbar("R Scale",    win, params["r_scale"],    1010, nothing)
@@ -109,6 +117,7 @@ def main():
         params["hue_hi"]     = cv2.getTrackbarPos("Hue High",   win)
         params["sat_thresh"] = cv2.getTrackbarPos("Sat Thresh", win)
         params["val_thresh"] = cv2.getTrackbarPos("Val Thresh", win)
+        params["margin"]     = cv2.getTrackbarPos("Margin",     win)
         params["strength"]   = cv2.getTrackbarPos("Strength",   win)
         params["darken"]     = cv2.getTrackbarPos("Darken",     win)
         params["r_scale"]    = cv2.getTrackbarPos("R Scale",    win)

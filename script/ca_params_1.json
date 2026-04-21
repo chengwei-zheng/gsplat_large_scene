@@ -6,5 +6,6 @@
   "strength": 60,
   "darken": 50,
   "r_scale": 1000,
-  "b_scale": 1000
+  "b_scale": 1000,
+  "margin": 0
 }

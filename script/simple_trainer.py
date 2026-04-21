@@ -58,6 +58,12 @@ class Config:
     data_dir: str = "data/360_v2/garden"
     # Name of the images folder inside data_dir
     image_folder: str = "images"
+    # Name of the sparse folder inside data_dir (COLMAP output)
+    sparse_folder: str = "sparse"
+    # Path to CA (purple fringe) mask folder; grayscale PNGs, 255=strong fringe
+    ca_mask_dir: Optional[str] = None
+    # Loss weight for pixels inside CA mask (0=ignore, 1=normal)
+    ca_weight: float = 0.2
     # Downsample factor for the dataset
     data_factor: int = 4
     # Directory to save results
@@ -356,6 +362,8 @@ class Runner:
             normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
             image_folder=cfg.image_folder,
+            sparse_folder=cfg.sparse_folder,
+            ca_mask_dir=cfg.ca_mask_dir,
         )
         self.trainset = Dataset(
             self.parser,
@@ -365,20 +373,23 @@ class Runner:
         )
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
-        print("Scene scale:", self.scene_scale)
+        print(f"Scene scale: {self.scene_scale:.4f} (parser: {self.parser.scene_scale:.4f}, global_scale: {cfg.global_scale})")
 
         # Compute sky_depth_min from point cloud max Z height
         pts = self.parser.points  # (N, 3) in COLMAP world coordinates
         max_z = float(pts[:, 2].max())
+        z_min = float(pts[:, 2].min())
         self.sky_depth_min = 0.5 * max_z
+        # Ground floor: point cloud min Z minus a margin proportional to scene height
+        scene_height = max_z - z_min
+        self.z_floor = z_min - 0.02 * scene_height
         # Sky hemisphere center: (xy_center, z_min) in COLMAP coordinates
         x_center = float((pts[:, 0].min() + pts[:, 0].max()) / 2)
         y_center = float((pts[:, 1].min() + pts[:, 1].max()) / 2)
-        z_min = float(pts[:, 2].min())
         self.sky_hemisphere_center = torch.tensor(
             [x_center, y_center, z_min], dtype=torch.float32
         )
-        print(f"Point cloud max Z: {max_z:.3f}, sky_depth_min: {self.sky_depth_min:.3f}")
+        print(f"Point cloud Z range: [{z_min:.3f}, {max_z:.3f}], sky_depth_min: {self.sky_depth_min:.3f}, z_floor: {self.z_floor:.3f}")
         print(f"Sky hemisphere center: [{x_center:.3f}, {y_center:.3f}, {z_min:.3f}], radius threshold: {self.sky_depth_min:.3f}")
 
         # Model
@@ -671,6 +682,7 @@ class Runner:
             image_ids = data["image_id"].to(device)
             masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
             sky_masks = data["sky_mask"].to(device) if "sky_mask" in data else None  # [1, H, W], True=sky
+            ca_masks = data["ca_mask"].to(device) if "ca_mask" in data else None  # [1, H, W], float [0,1]
             if cfg.depth_loss:
                 points = data["points"].to(device)  # [1, M, 2]
                 depths_gt = data["depths"].to(device)  # [1, M]
@@ -743,6 +755,11 @@ class Runner:
                     weight = weight * valid.float()  # zero out invalid pixels
                 else:
                     weight = valid.float()
+                # CA mask: reduce weight for purple-fringe pixels
+                # ca_masks in [0,1]; weight factor: 1 - ca_masks*(1-ca_weight)
+                if ca_masks is not None:
+                    ca_factor = 1.0 - ca_masks * (1.0 - cfg.ca_weight)  # [B, H, W]
+                    weight = weight * ca_factor
                 weight_expanded = weight.unsqueeze(-1)  # [B, H, W, 1]
 
                 # For L1 loss: only compute on valid pixels (mask > 0)
@@ -1000,6 +1017,7 @@ class Runner:
                     packed=cfg.packed,
                     sky_center=self.sky_hemisphere_center,
                     sky_radius=self.sky_depth_min,
+                    z_floor=self.z_floor,
                 )
 
                 # After reset: recompute mask on updated splats and restore sky opacities
