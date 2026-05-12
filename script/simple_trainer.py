@@ -338,6 +338,13 @@ class Runner:
         # Where to dump results.
         os.makedirs(cfg.result_dir, exist_ok=True)
 
+        # Save the command used to launch this run.
+        if self.world_rank == 0:
+            import sys
+            cmd_path = os.path.join(cfg.result_dir, "cmd.txt")
+            with open(cmd_path, "w") as f:
+                f.write(" ".join(sys.argv) + "\n")
+
         # Setup output directories.
         self.ckpt_dir = f"{cfg.result_dir}/ckpts"
         os.makedirs(self.ckpt_dir, exist_ok=True)
@@ -497,6 +504,8 @@ class Runner:
                     eps=1e-15,
                 ),
             ]
+            if world_size > 1:
+                self.bil_grids = DDP(self.bil_grids)
 
         # Losses & Metrics.
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
@@ -523,6 +532,63 @@ class Runner:
                 output_dir=Path(cfg.result_dir),
                 mode="training",
             )
+
+    @property
+    def bil_grids_module(self):
+        """Return the underlying BilateralGrid, unwrapping DDP if necessary."""
+        if isinstance(self.bil_grids, DDP):
+            return self.bil_grids.module
+        return self.bil_grids
+
+    @torch.no_grad()
+    def _denormalize_splats(
+        self,
+        means: Tensor,
+        scales: Tensor,
+        quats: Tensor,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        """Convert Gaussian means/scales/quats from normalized space back to original COLMAP coordinates."""
+        T = torch.from_numpy(self.parser.transform).float().to(means.device)  # (4, 4)
+
+        # Decompose similarity transform: T = [[sR, t], [0, 1]]
+        s = torch.linalg.norm(T[:3, 0])  # scale factor
+        R = T[:3, :3] / s               # pure rotation (3, 3)
+        t = T[:3, 3]                    # translation (3,)
+
+        # Inverse: P_orig = (1/s) * R^T @ (P_norm - t)
+        R_inv = R.T
+        means_out = (means - t[None, :]) @ R_inv.T / s  # (N, 3)
+
+        # Scales: distances scale by s in normalized space, so undo with -log(s)
+        scales_out = scales - torch.log(s)
+
+        # Quaternions: left-multiply by the quaternion of R_inv
+        # Convert R_inv to quaternion
+        trace = R_inv[0, 0] + R_inv[1, 1] + R_inv[2, 2]
+        if trace > 0:
+            w = 0.5 * torch.sqrt(1.0 + trace)
+            s4 = 0.25 / w
+            x = (R_inv[2, 1] - R_inv[1, 2]) * s4
+            y = (R_inv[0, 2] - R_inv[2, 0]) * s4
+            z = (R_inv[1, 0] - R_inv[0, 1]) * s4
+        else:
+            # fallback for degenerate cases
+            x = torch.tensor(0.0, device=means.device)
+            y = torch.tensor(0.0, device=means.device)
+            z = torch.tensor(0.0, device=means.device)
+            w = torch.tensor(1.0, device=means.device)
+        q_R_inv = torch.stack([w, x, y, z])  # (4,) wxyz
+
+        # Stored quats are wxyz; compose: q_out = q_R_inv ⊗ q_norm
+        qw, qx, qy, qz = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
+        rw, rx, ry, rz = q_R_inv[0], q_R_inv[1], q_R_inv[2], q_R_inv[3]
+        out_w = rw * qw - rx * qx - ry * qy - rz * qz
+        out_x = rw * qx + rx * qw + ry * qz - rz * qy
+        out_y = rw * qy - rx * qz + ry * qw + rz * qx
+        out_z = rw * qz + rx * qy - ry * qx + rz * qw
+        quats_out = torch.stack([out_w, out_x, out_y, out_z], dim=-1)  # (N, 4)
+
+        return means_out, scales_out, quats_out
 
     def rasterize_splats(
         self,
@@ -607,6 +673,9 @@ class Runner:
             ckpt = torch.load(cfg.resume, map_location=device, weights_only=True)
             for k in self.splats.keys():
                 self.splats[k].data = ckpt["splats"][k]
+            if cfg.pose_opt and "pose_adjust" in ckpt:
+                self.pose_adjust.load_state_dict(ckpt["pose_adjust"])
+                print("Loaded pose_adjust from checkpoint.")
             init_step = ckpt["step"] + 1
             print(f"Loaded {len(self.splats['means'])} gaussians, resuming from step {init_step}")
 
@@ -724,7 +793,7 @@ class Runner:
                 )
                 grid_xy = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
                 colors = slice(
-                    self.bil_grids,
+                    self.bil_grids_module,
                     grid_xy.expand(colors.shape[0], -1, -1, -1),
                     colors,
                     image_ids.unsqueeze(-1),
@@ -798,7 +867,7 @@ class Runner:
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
             if cfg.use_bilateral_grid:
-                tvloss = 10 * total_variation_loss(self.bil_grids.grids)
+                tvloss = 10 * total_variation_loss(self.bil_grids_module.grids)
                 loss += tvloss
 
             # Sky depth regularization: push sky gaussians far away
@@ -904,7 +973,7 @@ class Runner:
                     "w",
                 ) as f:
                     json.dump(stats, f)
-                data = {"step": step, "splats": self.splats.state_dict()}
+                data = {"step": step, "splats": self.splats.state_dict(), "transform": torch.from_numpy(self.parser.transform).float()}
                 if cfg.pose_opt:
                     if world_size > 1:
                         data["pose_adjust"] = self.pose_adjust.module.state_dict()
@@ -942,6 +1011,10 @@ class Runner:
                 scales = self.splats["scales"]
                 quats = self.splats["quats"]
                 opacities = self.splats["opacities"]
+
+                if cfg.normalize_world_space:
+                    means, scales, quats = self._denormalize_splats(means, scales, quats)
+
                 export_splats(
                     means=means,
                     scales=scales,
@@ -1358,6 +1431,27 @@ class Runner:
 
 
 def main(local_rank: int, world_rank, world_size: int, cfg: Config):
+    # Import BilateralGrid here so it is available in all spawned subprocesses
+    # (the if __name__ == "__main__" block does not run in spawn'd children)
+    if cfg.use_bilateral_grid or cfg.use_fused_bilagrid:
+        global BilateralGrid, color_correct, slice, total_variation_loss
+        if cfg.use_fused_bilagrid:
+            cfg.use_bilateral_grid = True
+            from fused_bilagrid import (
+                BilateralGrid,
+                color_correct,
+                slice,
+                total_variation_loss,
+            )
+        else:
+            cfg.use_bilateral_grid = True
+            from lib_bilagrid import (
+                BilateralGrid,
+                color_correct,
+                slice,
+                total_variation_loss,
+            )
+
     if world_size > 1 and not cfg.disable_viewer:
         cfg.disable_viewer = True
         if world_rank == 0:
@@ -1373,8 +1467,13 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         ]
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
+        if cfg.pose_opt and "pose_adjust" in ckpts[0]:
+            runner.pose_adjust.load_state_dict(ckpts[0]["pose_adjust"])
+            print("Loaded pose_adjust from checkpoint.")
         step = ckpts[0]["step"]
-        runner.eval(step=step)
+        runner.eval(step=step, stage="val")
+        if cfg.eval_train:
+            runner.eval(step=step, stage="train")
         runner.render_traj(step=step)
         if cfg.compression is not None:
             runner.run_compression(step=step)
@@ -1432,25 +1531,6 @@ if __name__ == "__main__":
     elif isinstance(strategy, MCMCStrategy):
         strategy.refine_stop_iter = target_stop_iter
         print(f"[Config] MCMCStrategy: refine_stop_iter={target_stop_iter} (80% of {cfg.max_steps})")
-
-    # Import BilateralGrid and related functions based on configuration
-    if cfg.use_bilateral_grid or cfg.use_fused_bilagrid:
-        if cfg.use_fused_bilagrid:
-            cfg.use_bilateral_grid = True
-            from fused_bilagrid import (
-                BilateralGrid,
-                color_correct,
-                slice,
-                total_variation_loss,
-            )
-        else:
-            cfg.use_bilateral_grid = True
-            from lib_bilagrid import (
-                BilateralGrid,
-                color_correct,
-                slice,
-                total_variation_loss,
-            )
 
     # try import extra dependencies
     if cfg.compression == "png":

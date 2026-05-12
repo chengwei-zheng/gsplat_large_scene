@@ -93,7 +93,7 @@ class DefaultStrategy(Strategy):
     verbose: bool = False
     key_for_gradient: Literal["means2d", "gradient_2dgs"] = "means2d"
     max_sky_frac: float = 0.1
-    max_gs: int = 16_000_000
+    max_gs: int = 15_000_000
 
     def initialize_state(self, scene_scale: float = 1.0) -> Dict[str, Any]:
         """Initialize and return the running state for this strategy.
