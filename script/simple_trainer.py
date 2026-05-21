@@ -118,6 +118,8 @@ class Config:
     init_scale: float = 1.0
     # Weight for SSIM loss
     ssim_lambda: float = 0.2
+    # Peak weight for bilateral grid identity regularization (linearly decays to 0 over the first half of training)
+    bil_grid_reg_weight: float = 0.1
 
     # Near plane clipping distance
     near_plane: float = 0.01
@@ -342,6 +344,11 @@ class Runner:
         if self.world_rank == 0:
             import sys
             cmd_path = os.path.join(cfg.result_dir, "cmd.txt")
+            if os.path.exists(cmd_path):
+                i = 1
+                while os.path.exists(os.path.join(cfg.result_dir, f"cmd_{i}.txt")):
+                    i += 1
+                cmd_path = os.path.join(cfg.result_dir, f"cmd_{i}.txt")
             with open(cmd_path, "w") as f:
                 f.write(" ".join(sys.argv) + "\n")
 
@@ -676,6 +683,9 @@ class Runner:
             if cfg.pose_opt and "pose_adjust" in ckpt:
                 self.pose_adjust.load_state_dict(ckpt["pose_adjust"])
                 print("Loaded pose_adjust from checkpoint.")
+            if cfg.use_bilateral_grid and "bil_grids" in ckpt:
+                self.bil_grids_module.load_state_dict(ckpt["bil_grids"])
+                print("Loaded bil_grids from checkpoint.")
             init_step = ckpt["step"] + 1
             print(f"Loaded {len(self.splats['means'])} gaussians, resuming from step {init_step}")
 
@@ -870,6 +880,19 @@ class Runner:
                 tvloss = 10 * total_variation_loss(self.bil_grids_module.grids)
                 loss += tvloss
 
+                # Identity regularization: grids should stay close to identity transform.
+                # Weight decays linearly from 0.1 to 0 over the first half of training.
+                half_steps = max_steps // 2
+                identity_reg_weight = cfg.bil_grid_reg_weight * max(0.0, 1.0 - step / half_steps)
+                if identity_reg_weight > 0.0:
+                    grids = self.bil_grids_module.grids  # (N, 12, L, H, W)
+                    identity = torch.zeros_like(grids)
+                    identity[:, [0, 5, 10], ...] = 1.0   # diagonal of 3x3 = 1
+                    identity_loss = ((grids - identity) ** 2).mean()
+                    loss += identity_reg_weight * identity_loss
+                else:
+                    identity_loss = torch.zeros(1, device=device)
+
             # Sky depth regularization: push sky gaussians far away
             sky_depthloss = torch.zeros(1, device=device)
             if cfg.sky_depth_reg > 0.0 and sky_masks is not None and depths is not None:
@@ -924,6 +947,7 @@ class Runner:
                     self.writer.add_scalar("train/sky_depthloss", sky_depthloss.item(), step)
                 if cfg.use_bilateral_grid:
                     self.writer.add_scalar("train/tvloss", tvloss.item(), step)
+                    self.writer.add_scalar("train/identity_loss", identity_loss.item(), step)
                 if cfg.tb_save_image:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
@@ -984,6 +1008,9 @@ class Runner:
                         data["app_module"] = self.app_module.module.state_dict()
                     else:
                         data["app_module"] = self.app_module.state_dict()
+                if cfg.use_bilateral_grid:
+                    data["bil_grids"] = self.bil_grids_module.state_dict()
+                    data["bilateral_grid_shape"] = list(cfg.bilateral_grid_shape)
                 torch.save(
                     data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
                 )
@@ -1470,6 +1497,9 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         if cfg.pose_opt and "pose_adjust" in ckpts[0]:
             runner.pose_adjust.load_state_dict(ckpts[0]["pose_adjust"])
             print("Loaded pose_adjust from checkpoint.")
+        if cfg.use_bilateral_grid and "bil_grids" in ckpts[0]:
+            runner.bil_grids_module.load_state_dict(ckpts[0]["bil_grids"])
+            print("Loaded bil_grids from checkpoint.")
         step = ckpts[0]["step"]
         runner.eval(step=step, stage="val")
         if cfg.eval_train:

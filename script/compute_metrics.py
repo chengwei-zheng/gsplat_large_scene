@@ -226,7 +226,6 @@ def main():
     rows_sky  = []
     psnr_all,     ssim_all,     lpips_all     = [], [], []
     psnr_sky_all, ssim_sky_all, lpips_sky_all = [], [], []
-    brightness_ratios = []  # TEMP: gt/result brightness ratio per frame
 
     sampled_paths = image_paths[::args.step]
     print(f"Processing {len(sampled_paths)} / {len(image_paths)} images (step={args.step}).")
@@ -247,15 +246,21 @@ def main():
             gt     = to_grayscale(gt)
             result = to_grayscale(result)
 
-        # TEMP: compute gt/result brightness ratio over valid pixels
-        valid_mask = (result > 0).any(axis=-1)  # (H, W)
-        if valid_mask.any():
-            gt_lum     = gt[valid_mask].astype(np.float64).mean(axis=-1)
-            result_lum = result[valid_mask].astype(np.float64).mean(axis=-1)
-            nonzero    = result_lum > 0
-            if nonzero.any():
-                ratio = (gt_lum[nonzero] / result_lum[nonzero]).mean()
-                brightness_ratios.append(ratio)
+            # Fit a linear brightness transform: result_adjusted = a * result + b
+            # minimizing MSE against gt over valid (non-black) pixels.
+            valid_mask = (result > 0).any(axis=-1)  # (H, W)
+            if valid_mask.any():
+                lum_result = result[valid_mask].astype(np.float64).mean(axis=-1)  # (M,)
+                lum_gt     = gt[valid_mask].astype(np.float64).mean(axis=-1)      # (M,)
+                # Least squares: [lum_result, 1] @ [a, b]^T = lum_gt
+                A = np.stack([lum_result, np.ones_like(lum_result)], axis=1)
+                coef, _, _, _ = np.linalg.lstsq(A, lum_gt, rcond=None)
+                a, b = coef[0], coef[1]
+                result_adj = np.clip(result.astype(np.float64) * a + b, 0, 255).astype(np.uint8)
+                result_adj[~valid_mask] = 0  # keep originally-black pixels black
+            else:
+                result_adj = result
+            result = result_adj
 
         fname = os.path.basename(path)
 
@@ -325,13 +330,6 @@ def main():
 
     if args.visualize:
         cv2.destroyAllWindows()
-
-    # TEMP: print brightness ratio summary
-    if brightness_ratios:
-        print(f"\n[TEMP] GT/Result brightness ratio over valid pixels: "
-              f"mean={np.mean(brightness_ratios):.4f}  "
-              f"std={np.std(brightness_ratios):.4f}  "
-              f"n={len(brightness_ratios)}")
 
     if not rows and not rows_sky:
         print("[ERROR] No valid images were processed.", file=sys.stderr)

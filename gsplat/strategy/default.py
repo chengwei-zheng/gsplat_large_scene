@@ -187,8 +187,9 @@ class DefaultStrategy(Strategy):
             if self.max_gs <= 0 or len(params["means"]) < self.max_gs:
                 n_dupli, n_split = self._grow_gs(params, optimizers, state, step)
             if self.verbose:
+                rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
                 print(
-                    f"Step {step}: {n_dupli} GSs duplicated, {n_split} GSs split. "
+                    f"[rank{rank}] Step {step}: {n_dupli} GSs duplicated, {n_split} GSs split. "
                     f"Now having {len(params['means'])} GSs."
                 )
 
@@ -211,6 +212,17 @@ class DefaultStrategy(Strategy):
                     protect_mask = dist > sky_radius
                 n_sky_pruned = self._cap_sky_gs(params, optimizers, state, protect_mask)
 
+            # clamp sky Gaussian scales to sky_radius (in log space)
+            # recompute protect_mask after _cap_sky_gs (indices changed)
+            if sky_center is not None and sky_radius > 0:
+                with torch.no_grad():
+                    dist = torch.norm(params["means"] - sky_center.to(params["means"].device), dim=-1)
+                    protect_mask = dist > sky_radius
+                    max_log_scale = torch.log(torch.tensor(sky_radius * 0.1, device=params["scales"].device))
+                    sky_idx = protect_mask.nonzero(as_tuple=False).squeeze(1)
+                    if sky_idx.numel() > 0:
+                        params["scales"][sky_idx] = params["scales"][sky_idx].clamp(max=max_log_scale)
+
             # prune underground Gaussians
             n_underground = 0
             if z_floor is not None:
@@ -221,9 +233,10 @@ class DefaultStrategy(Strategy):
                     remove(params=params, optimizers=optimizers, state=state, mask=is_underground)
 
             if self.verbose:
+                rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
                 n_sky = int(protect_mask.sum().item()) if protect_mask is not None else 0
                 print(
-                    f"Step {step}: {n_prune} GSs pruned ({n_sky_pruned} sky capped, {n_underground} underground). "
+                    f"[rank{rank}] Step {step}: {n_prune} GSs pruned ({n_sky_pruned} sky capped, {n_underground} underground). "
                     f"Now having {len(params['means'])} GSs "
                     f"(sky: {n_sky})."
                 )

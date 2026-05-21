@@ -14,9 +14,9 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
-dir1 = "/home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_MyCMR_opti_skyLAS20x_step40x_SH2_global03_sky01Cap_grow012_SReg005/renders_woD"
-dir2 = "/home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_MyCMR_splatPLY/renders"
-output_dir = "/home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_MyCMR_opti_skyLAS20x_step40x_SH2_global03_sky01Cap_grow012_SReg005/renders_woD_stitched"
+dir1 = "/home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_3GPU/renders"
+dir2 = "/home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_LCC/renders"
+output_dir = "/home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_3GPU/renders_stitched"
 
 os.makedirs(output_dir, exist_ok=True)
 
@@ -46,14 +46,17 @@ for fname in tqdm(sorted(os.listdir(dir1))):
         skipped += 1
         continue
 
-    img1 = np.array(Image.open(os.path.join(dir1, fname)).convert("RGB"))  # (N, 2N, 3)
-    img2 = np.array(Image.open(dir2_index[key]).convert("RGB"))             # (N, 3N, 3)
+    img1 = np.array(Image.open(os.path.join(dir1, fname)).convert("RGB"))  # (H, W1, 3)
+    img2 = np.array(Image.open(dir2_index[key]).convert("RGB"))             # (H, W2, 3)
+
+    W1 = img1.shape[1]
+    img1 = img1[:, :W1 * 2 // 3]  # left 2/3 of img1
 
     W2 = img2.shape[1]   # 3N
     N = W2 // 3
     crop = img2[:, N:2 * N]  # middle N x N
 
-    result = np.concatenate([img1, crop], axis=1)  # (N, 3N, 3)
+    result = np.concatenate([img1, crop], axis=1)
     Image.fromarray(result).save(os.path.join(output_dir, fname))
     matched += 1
 

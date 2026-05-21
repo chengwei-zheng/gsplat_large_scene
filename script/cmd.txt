@@ -209,47 +209,28 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python simple_trainer.py mcmc \
 CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
       --data_dir /home/yiinqiang/SMBC/data/Forest_hinoki_260413_L2PRO/perspective \
       --data_factor 1 \
-      --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_3GPU \
+      --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU \
       --eval_train \
+      --sh_degree 2 --pose_opt --test_every 0 \
       --ckpt \
-          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_3GPU/ckpts/ckpt_599999_rank0.pt \
-          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_3GPU/ckpts/ckpt_599999_rank1.pt \
-          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_3GPU/ckpts/ckpt_599999_rank2.pt
+          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank0.pt \
+          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank1.pt \
+          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank2.pt \
+          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank3.pt
 
 CUDA_VISIBLE_DEVICES=0 python -m simple_viewer \
-    --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/greenhouse_K1_MyCMR_opti_LAS10x_step40x_SH2_global02/ckpts/ckpt_1199999_rank0.pt \
-    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/greenhouse_K1_MyCMR_opti_LAS10x_step40x_SH2_global02/viewer/ \
+    --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_merged.pt \
+    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/viewer/ \
     --port 8080
 
-CUDA_VISIBLE_DEVICES=1 python -m simple_viewer \
-    --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_MyCMR_opti_mergeLAS20x_step20x_SH2_grow3d01x/ckpts/ckpt_599999_rank0.pt \
-    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_MyCMR_opti_mergeLAS20x_step20x_SH2_grow3d01x/viewer/ \
-    --port 8081
-
-CUDA_VISIBLE_DEVICES=3 python -m simple_viewer \
-    --ckpt /home/yiinqiang/SMBC/data/tanashi-peach1_20251129-124511_k1/splatPLY_tanashi-peach1_3dgs/point_cloud.pt \
-    --output_dir /home/yiinqiang/SMBC/data/tanashi-peach1_20251129-124511_k1/splatPLY_tanashi-peach1_3dgs/viewer/ \
-    --port 8082
-
-CUDA_VISIBLE_DEVICES=3 python -m simple_viewer \
-    --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_LCC/ckpts/merge.pt \
-    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_LCC/ckpts/viewer \
-    --port 8085
-
 CUDA_VISIBLE_DEVICES=0 python -m simple_viewer \
-    --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_MyCMR_opti_skyLAS20x_step40x_SH2_global03_sky01Cap_grow012_SReg005/ckpts/ckpt_1199999_rank0.pt \
-    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/tanashi-peach1_K1_MyCMR_opti_skyLAS20x_step40x_SH2_global03_sky01Cap_grow012_SReg005/ckpts/viewer/ \
-    --port 8083
-
-CUDA_VISIBLE_DEVICES=2 python -m simple_viewer \
-    --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_BadCMR_opti_skyLAS20x_step40x_SH2_global03_sky01Cap_grow02_SReg005_BG114/ckpts/ckpt_1199999_rank0.pt \
-    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_BadCMR_opti_skyLAS20x_step40x_SH2_global03_sky01Cap_grow02_SReg005_BG114/viewer/ \
-    --port 8084
-
-CUDA_VISIBLE_DEVICES=1 python -m simple_viewer \
-    --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114/merge/merged.pt \
-    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114/merge/viewer/ \
-    --port 8085
+    --ckpt \
+          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank0.pt \
+          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank1.pt \
+          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank2.pt \
+          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank3.pt \
+    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/viewer/ \
+    --port 8080
 
 # --- EXPORT CHECKPOINT ---
 

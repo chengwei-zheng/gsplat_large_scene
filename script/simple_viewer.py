@@ -348,7 +348,7 @@ if __name__ == "__main__":
     """
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--output_dir", type=str, default="results/", help="where to dump outputs"
+        "--output_dir", type=str, default=None, help="where to dump outputs (default: same directory as --ckpt)"
     )
     parser.add_argument(
         "--scene_grid", type=int, default=1, help="repeat the scene into a grid of NxN"
@@ -397,6 +397,11 @@ if __name__ == "__main__":
         help="Normalize world space, must match training setting (default: True)"
     )
     args = parser.parse_args()
+    if args.output_dir is None:
+        if args.ckpt is not None:
+            args.output_dir = os.path.join(os.path.dirname(os.path.abspath(args.ckpt[0])), "..", "viewer")
+        else:
+            args.output_dir = "results/"
     if not args.render_dataset:
         assert args.scene_grid % 2 == 1, "scene_grid must be odd"
 
