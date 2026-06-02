@@ -226,18 +226,13 @@ def main():
     }
     if transform is not None:
         merged["transform"] = transform
-    for optional_key in ("pose_adjust", "app_module", "bil_grids", "bilateral_grid_shape"):
+    for optional_key in ("pose_adjust", "app_module", "bil_grids", "bilateral_grid_shape",
+                         "sky_hemisphere_center", "sky_depth_min"):
         if optional_key in rank_ckpts[0]:
             merged[optional_key] = rank_ckpts[0][optional_key]
 
     total_gs = merged_splats["means"].shape[0]
     print(f"Total Gaussians: {total_gs:,}")
-
-    if args.clamp_scale is not None:
-        log_max = torch.tensor(args.clamp_scale, dtype=merged_splats["scales"].dtype).log()
-        n_clamped = (merged_splats["scales"] > log_max).any(dim=-1).sum().item()
-        merged_splats["scales"] = merged_splats["scales"].clamp(max=log_max)
-        print(f"[clamp_scale={args.clamp_scale}] Clamped {n_clamped:,} Gaussians ({100*n_clamped/total_gs:.2f}%)")
 
     if args.sparse_dir is not None:
         if transform is None:
@@ -257,6 +252,13 @@ def main():
             print(f"Removed {n_sky:,} sky Gaussians. Remaining: {n_kept:,}")
     elif args.remove_sky:
         print("Warning: --remove_sky has no effect without --sparse_dir")
+
+    if args.clamp_scale is not None:
+        total_gs = merged_splats["means"].shape[0]
+        log_max = torch.tensor(args.clamp_scale, dtype=merged_splats["scales"].dtype).log()
+        n_clamped = (merged_splats["scales"] > log_max).any(dim=-1).sum().item()
+        merged_splats["scales"] = merged_splats["scales"].clamp(max=log_max)
+        print(f"[clamp_scale={args.clamp_scale}] Clamped {n_clamped:,} Gaussians ({100*n_clamped/total_gs:.2f}%)")
 
     out_path = args.output or os.path.join(ckpt_dir, f"ckpt_{step}_merged.pt")
     torch.save(merged, out_path)

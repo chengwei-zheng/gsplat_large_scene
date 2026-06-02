@@ -997,7 +997,9 @@ class Runner:
                     "w",
                 ) as f:
                     json.dump(stats, f)
-                data = {"step": step, "splats": self.splats.state_dict(), "transform": torch.from_numpy(self.parser.transform).float()}
+                data = {"step": step, "splats": self.splats.state_dict(), "transform": torch.from_numpy(self.parser.transform).float(),
+                        "sky_hemisphere_center": self.sky_hemisphere_center,
+                        "sky_depth_min": torch.tensor(self.sky_depth_min)}
                 if cfg.pose_opt:
                     if world_size > 1:
                         data["pose_adjust"] = self.pose_adjust.module.state_dict()

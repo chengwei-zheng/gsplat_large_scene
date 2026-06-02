@@ -185,24 +185,6 @@ CUDA_VISIBLE_DEVICES=3 python simple_trainer.py default \
     --resume /home/yiinqiang/SMBC/data/tanashi-peach1_20251129-124511_k1/splatPLY_tanashi-peach1_3dgs/merge.pt \
     --eval_train
 
-# Greenhouse K1 - MCMC strategy (potentially better details)
-CUDA_VISIBLE_DEVICES=3 python simple_trainer.py mcmc \
-    --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_MyOpti \
-    --data_factor 1 \
-    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/greenhouse_K1_MyCMR_opti_LAS20x_step20x_mcmc \
-    --steps_scaler 20.0 \
-    --pose_opt \
-    --test_every 0
-
-CUDA_VISIBLE_DEVICES=0,1,2,3 python simple_trainer.py mcmc \
-      --data_dir /home/yiinqiang/SMBC/data/greenhouse_K1_251020/GK_test260110/split_dataset_MyOpti \
-      --data_factor 1 \
-      --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/greenhouse_K1_MyCMR_opti_LAS20x_step20x_mcmc \
-      --steps_scaler 5.0 \
-      --pose_opt \
-      --test_every 0 \
-      --packed
-
 
 # --- VIEWER ---
 
