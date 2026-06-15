@@ -201,8 +201,7 @@ CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
           /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank3.pt
 
 CUDA_VISIBLE_DEVICES=0 python -m simple_viewer \
-    --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_merged.pt \
-    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/viewer/ \
+    --ckpt /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_3GPU/ckpts/ckpt_599999_merged_woSky_labeled.pt \
     --port 8080
 
 CUDA_VISIBLE_DEVICES=0 python -m simple_viewer \

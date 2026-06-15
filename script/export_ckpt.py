@@ -117,12 +117,89 @@ def do_export_points3d(ckpt, output_dir):
     print(f"points3D.txt exported to {output_path} ({n_points:,} points)")
 
 
-def do_export_treeiso_points(ckpt, output_dir, opacity_threshold=0.5):
-    """Export Gaussian means as a metric-coordinate PLY for treeiso input.
+def _compute_obb_2d(points_xy):
+    """Compute the minimum-area oriented bounding rectangle of a 2D point set.
 
-    Filters by sigmoid(opacity) > threshold, then applies the inverse of the
-    stored normalization transform so coordinates are in the original COLMAP
-    world frame (metres).
+    Uses rotating calipers over the convex hull edges.
+    Returns (angle_rad, min_u, max_u, min_v, max_v) where u/v are axes of the
+    rotated frame aligned with the rectangle.
+    """
+    from scipy.spatial import ConvexHull
+    hull = ConvexHull(points_xy)
+    hull_pts = points_xy[hull.vertices]
+    n = len(hull_pts)
+
+    min_area = np.inf
+    best = None
+    for i in range(n):
+        edge = hull_pts[(i + 1) % n] - hull_pts[i]
+        angle = np.arctan2(edge[1], edge[0])
+        c, s = np.cos(-angle), np.sin(-angle)
+        rot = hull_pts @ np.array([[c, -s], [s, c]]).T
+        min_u, max_u = rot[:, 0].min(), rot[:, 0].max()
+        min_v, max_v = rot[:, 1].min(), rot[:, 1].max()
+        area = (max_u - min_u) * (max_v - min_v)
+        if area < min_area:
+            min_area = area
+            best = (angle, min_u, max_u, min_v, max_v)
+    return best
+
+
+def _filter_by_obb_2d(means_world, bbox_ply_path, margin=0.0):
+    """Return boolean mask (N,) for means_world points inside the 2D OBB from bbox_ply_path.
+
+    The OBB is the minimum-area bounding rectangle of the XY projection of the
+    bbox PLY. Z is ignored — the constraint is purely in XY.
+    margin: shrink each side of the rectangle inward by this many metres.
+    """
+    from convert_las import read_ply as _read_ply
+    bbox_pts, _ = _read_ply(bbox_ply_path)  # (M, 3) float64
+    print(f"  bbox_ply XY range: x=[{bbox_pts[:,0].min():.2f}, {bbox_pts[:,0].max():.2f}]  "
+          f"y=[{bbox_pts[:,1].min():.2f}, {bbox_pts[:,1].max():.2f}]  ({len(bbox_pts)} pts)")
+    print(f"  means_world XY range: x=[{means_world[:,0].min():.2f}, {means_world[:,0].max():.2f}]  "
+          f"y=[{means_world[:,1].min():.2f}, {means_world[:,1].max():.2f}]")
+
+    angle, min_u, max_u, min_v, max_v = _compute_obb_2d(bbox_pts[:, :2])
+    print(f"  OBB angle={np.degrees(angle):.2f}°  "
+          f"u=[{min_u:.2f}, {max_u:.2f}] ({max_u-min_u:.2f}m)  "
+          f"v=[{min_v:.2f}, {max_v:.2f}] ({max_v-min_v:.2f}m)")
+
+    min_u += margin
+    max_u -= margin
+    min_v += margin
+    max_v -= margin
+    print(f"  OBB after margin ({margin}m): u=[{min_u:.2f}, {max_u:.2f}]  v=[{min_v:.2f}, {max_v:.2f}]")
+
+    if min_u > max_u or min_v > max_v:
+        raise ValueError(
+            f"bbox_margin={margin} is too large: OBB collapsed after shrinking "
+            f"(u: {max_u-min_u+2*margin:.3f}m wide → {max_u-min_u:.3f}m after margin, "
+            f"v: {max_v-min_v+2*margin:.3f}m wide → {max_v-min_v:.3f}m after margin). "
+            f"Reduce --bbox_margin."
+        )
+
+    c, s = np.cos(-angle), np.sin(-angle)
+    rotated = means_world[:, :2] @ np.array([[c, -s], [s, c]]).T
+    print(f"  rotated means_world: u=[{rotated[:,0].min():.2f}, {rotated[:,0].max():.2f}]  "
+          f"v=[{rotated[:,1].min():.2f}, {rotated[:,1].max():.2f}]")
+
+    inside = (
+        (rotated[:, 0] >= min_u) & (rotated[:, 0] <= max_u) &
+        (rotated[:, 1] >= min_v) & (rotated[:, 1] <= max_v)
+    )
+    print(f"OBB filter (margin={margin}m): {(~inside).sum():,} points removed, "
+          f"{inside.sum():,} remaining")
+    return inside
+
+
+def do_export_treeiso_points(ckpt, output_dir, bbox_ply=None, bbox_margin=0.0):
+    """Export Gaussian means + opacity as a metric-coordinate PLY for treeiso input.
+
+    Removes sky Gaussians and applies optional OBB bbox crop, then writes all
+    remaining Gaussians to PLY with sigmoid(opacity) in [0,1] as an extra
+    per-point attribute. No opacity threshold is applied at export time —
+    filtering by opacity can be done downstream.
+    Coordinates are in the original COLMAP world frame (metres).
     """
     splats = ckpt["splats"]
     means = splats["means"]
@@ -133,32 +210,62 @@ def do_export_treeiso_points(ckpt, output_dir, opacity_threshold=0.5):
     if isinstance(means, torch.Tensor):
         means = means.numpy()
 
-    mask = 1.0 / (1.0 + np.exp(-opacities.astype(np.float64))) > opacity_threshold
-    print(f"Opacity filter (>{opacity_threshold}): {mask.sum():,} / {len(mask):,} Gaussians kept")
+    all_idx = np.arange(len(means), dtype=np.int32)
 
+    # Step 1: sky filter (normalized space)
+    sky_removed = np.empty(0, dtype=np.int32)
+    non_sky_idx = all_idx
     if "sky_hemisphere_center" in ckpt and "sky_depth_min" in ckpt:
         center = ckpt["sky_hemisphere_center"].numpy()
         sky_depth_min = float(ckpt["sky_depth_min"])
         dist = np.linalg.norm(means - center, axis=-1)
         sky_mask = dist > sky_depth_min
-        mask = mask & ~sky_mask
-        print(f"Sky filter: {sky_mask.sum():,} sky Gaussians removed, {mask.sum():,} remaining")
+        sky_removed = all_idx[sky_mask]
+        non_sky_idx = all_idx[~sky_mask]
+        print(f"Sky filter: {len(sky_removed):,} sky Gaussians removed, {len(non_sky_idx):,} remaining")
+    else:
+        print("Warning: checkpoint has no sky parameters; sky Gaussians will not be removed.")
 
-    survivor = np.where(mask)[0].astype(np.int32)
-    means_filtered = means[survivor].astype(np.float64)
-    means_world = _inverse_transform(means_filtered, ckpt.get("transform"))
-    means_world = means_world.astype(np.float32)
+    # Step 2: bbox filter (world/metric space)
+    means_non_sky_world = _inverse_transform(means[non_sky_idx].astype(np.float64), ckpt.get("transform"))
+    bbox_removed = np.empty(0, dtype=np.int32)
+    in_bbox_idx = non_sky_idx
+    means_in_bbox_world = means_non_sky_world
+    if bbox_ply is not None:
+        obb_mask = _filter_by_obb_2d(means_non_sky_world, bbox_ply, margin=bbox_margin)
+        bbox_removed = non_sky_idx[~obb_mask]
+        in_bbox_idx = non_sky_idx[obb_mask]
+        means_in_bbox_world = means_non_sky_world[obb_mask]
+
+    survivor = in_bbox_idx
+    means_world = means_in_bbox_world.astype(np.float32)
+    opacity_vals = (1.0 / (1.0 + np.exp(-opacities[survivor].astype(np.float64)))).astype(np.float32)
     n_points = len(means_world)
+    print(f"Total exported: {n_points:,} (sky: {len(sky_removed):,} removed, bbox: {len(bbox_removed):,} removed)")
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Index map: survivor[i] is the index into the original Gaussian array for PLY point i.
-    # Use it to back-project treeiso labels: gaussian_labels[survivor] = treeiso_labels
+    # Index map: maps each Gaussian to its filter outcome.
+    #   survivor[i]  — PLY point i → original Gaussian index (treeiso output[i] maps back here)
+    #   sky_removed  — removed by sky hemisphere filter
+    #   bbox_removed — not sky, but outside OBB bbox
+    # Back-project: gaussian_labels[survivor] = treeiso_labels
     index_map_path = os.path.join(output_dir, "treeiso_input_index_map.npz")
-    np.savez(index_map_path, survivor=survivor)
-    print(f"Saved: {index_map_path} ({n_points:,} survivor indices)")
+    np.savez(index_map_path,
+             survivor=survivor,
+             sky_removed=sky_removed,
+             bbox_removed=bbox_removed)
+    print(f"Saved: {index_map_path} ({n_points:,} survivor, "
+          f"{len(sky_removed):,} sky, {len(bbox_removed):,} bbox-removed)")
 
     ply_path = os.path.join(output_dir, "treeiso_input.ply")
+    ply_data = np.empty(n_points, dtype=np.dtype([
+        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('opacity', '<f4')
+    ]))
+    ply_data['x'] = means_world[:, 0]
+    ply_data['y'] = means_world[:, 1]
+    ply_data['z'] = means_world[:, 2]
+    ply_data['opacity'] = opacity_vals
 
     with open(ply_path, "wb") as f:
         header = (
@@ -168,12 +275,13 @@ def do_export_treeiso_points(ckpt, output_dir, opacity_threshold=0.5):
             f"property float x\n"
             f"property float y\n"
             f"property float z\n"
+            f"property float opacity\n"
             f"end_header\n"
         )
         f.write(header.encode("ascii"))
-        f.write(means_world.tobytes())
+        f.write(ply_data.tobytes())
 
-    print(f"Saved: {ply_path} ({n_points:,} points)")
+    print(f"Saved: {ply_path} ({n_points:,} points, with opacity [0,1])")
 
 
 def do_export_poses(ckpt, output_dir, data_dir, test_every):
@@ -357,9 +465,12 @@ def main():
     p.add_argument("--export_points3d", action="store_true", default=False,
                    help="Export COLMAP points3D.txt in metric coordinates")
     p.add_argument("--export_treeiso_points", action="store_true", default=False,
-                   help="Export opacity-filtered xyz PLY for treeiso input")
-    p.add_argument("--treeiso_opacity_threshold", type=float, default=0.5,
-                   help="Sigmoid opacity threshold for treeiso export (default: 0.5)")
+                   help="Export xyz+opacity PLY for treeiso input (sky removed, optional bbox crop)")
+    p.add_argument("--bbox_ply", type=str, default=None,
+                   help="PLY file whose XY minimum bounding rectangle is used to crop the export. "
+                        "Z is ignored; the bounding box is not required to be axis-aligned.")
+    p.add_argument("--bbox_margin", type=float, default=0.0,
+                   help="Shrink each side of the bounding box inward by this many metres (default: 0.0)")
     p.add_argument("--export_poses", action="store_true", default=False,
                    help="Export camera poses in COLMAP text format (requires --data_dir)")
     p.add_argument("--reset_step", action="store_true", default=False,
@@ -387,7 +498,8 @@ def main():
         do_export_points3d(ckpt, args.output_dir)
 
     if args.export_treeiso_points:
-        do_export_treeiso_points(ckpt, args.output_dir, args.treeiso_opacity_threshold)
+        do_export_treeiso_points(ckpt, args.output_dir,
+                                 bbox_ply=args.bbox_ply, bbox_margin=args.bbox_margin)
 
     if args.export_poses:
         do_export_poses(ckpt, args.output_dir, args.data_dir, args.test_every)

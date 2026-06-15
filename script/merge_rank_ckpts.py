@@ -10,6 +10,9 @@ merged checkpoint that can be used for single-GPU evaluation / export.
 Usage:
     python merge_rank_ckpts.py --ckpt_dir /path/to/result/ckpts [--step 29999] [--output merged.pt]
     python merge_rank_ckpts.py --ckpt_dir /path/to/result/ckpts --sparse_dir /path/to/sparse [--remove_sky]
+
+    # Patch an existing merged checkpoint that lacks 'transform' (old format):
+    python merge_rank_ckpts.py --ckpt path/to/merged.pt --sparse_dir /path/to/sparse [--remove_sky]
 """
 
 import argparse
@@ -109,7 +112,11 @@ def infer_transform_from_sparse(sparse_dir):
 
 
 def detect_sky_gaussians(means, transform, colmap_pts):
-    """Return boolean mask (N,) where True = sky Gaussian.
+    """Return (sky_mask, sky_hemisphere_center, sky_depth_min).
+
+    sky_mask              : boolean tensor (N,), True = sky Gaussian
+    sky_hemisphere_center : float32 tensor (3,) in normalized space
+    sky_depth_min         : float, distance threshold in normalized space
 
     Uses the same hemisphere logic as simple_trainer:
       sky_hemisphere_center = [x_center, y_center, z_min]  (normalized space)
@@ -133,7 +140,7 @@ def detect_sky_gaussians(means, transform, colmap_pts):
 
     dist = torch.norm(means - center[None, :], dim=-1)  # (N,)
     sky_mask = dist > sky_depth_min
-    return sky_mask
+    return sky_mask, center, sky_depth_min
 
 
 def find_steps(ckpt_dir):
@@ -158,12 +165,18 @@ def find_ranks(ckpt_dir, step):
 
 def main():
     parser = argparse.ArgumentParser(description="Merge multi-rank .pt checkpoints into one")
-    parser.add_argument("--ckpt_dir", required=True,
-                        help="Directory containing ckpt_*_rank*.pt files")
+    # --- source: either rank files (--ckpt_dir) or an already-merged single file (--ckpt) ---
+    src = parser.add_mutually_exclusive_group(required=True)
+    src.add_argument("--ckpt_dir",
+                     help="Directory containing ckpt_*_rank*.pt files")
+    src.add_argument("--ckpt",
+                     help="Path to an already-merged .pt file (skips rank merging; "
+                          "useful for patching old checkpoints that lack 'transform')")
     parser.add_argument("--step", type=int, default=None,
-                        help="Training step to merge (default: latest)")
+                        help="Training step to merge (default: latest); ignored with --ckpt")
     parser.add_argument("--output", default=None,
-                        help="Output file path (default: <ckpt_dir>/ckpt_<step>_merged.pt)")
+                        help="Output file path (default: <ckpt_dir>/ckpt_<step>_merged.pt "
+                             "or <ckpt_stem>_patched.pt when using --ckpt)")
     parser.add_argument("--device", default="cpu",
                         help="Device for tensor ops (default: cpu)")
     parser.add_argument("--clamp_scale", type=float, default=None,
@@ -176,71 +189,97 @@ def main():
                         help="Remove detected sky Gaussians from the merged checkpoint")
     args = parser.parse_args()
 
-    ckpt_dir = args.ckpt_dir
-    if not os.path.isdir(ckpt_dir):
-        raise FileNotFoundError(f"ckpt_dir not found: {ckpt_dir}")
-
-    steps = find_steps(ckpt_dir)
-    if not steps:
-        raise RuntimeError(f"No ckpt_*_rank*.pt files found in {ckpt_dir}")
-
-    step = args.step if args.step is not None else steps[-1]
-    if step not in steps:
-        raise ValueError(f"Step {step} not found. Available steps: {steps}")
-
-    ranks = find_ranks(ckpt_dir, step)
-    if not ranks:
-        raise RuntimeError(f"No rank files found for step {step}")
-
-    print(f"Step:  {step}")
-    print(f"Ranks: {ranks}")
-
     device = torch.device(args.device)
 
-    # Load all rank checkpoints
-    rank_ckpts = []
-    for r in ranks:
-        path = os.path.join(ckpt_dir, f"ckpt_{step}_rank{r}.pt")
-        print(f"  Loading rank {r}: {path}")
-        ck = torch.load(path, map_location=device, weights_only=False)
-        rank_ckpts.append(ck)
+    # ------------------------------------------------------------------
+    # Build merged checkpoint
+    # ------------------------------------------------------------------
+    if args.ckpt is not None:
+        # --- Mode: patch an already-merged single checkpoint ---
+        if not os.path.isfile(args.ckpt):
+            raise FileNotFoundError(f"ckpt not found: {args.ckpt}")
+        print(f"Loading existing merged checkpoint: {args.ckpt}")
+        merged = torch.load(args.ckpt, map_location=device, weights_only=False)
+        merged_splats = merged["splats"]
+        step = merged.get("step", "?")
+        print(f"Checkpoint step: {step}")
+        default_out = os.path.splitext(os.path.abspath(args.ckpt))[0] + "_patched.pt"
+    else:
+        # --- Mode: merge from per-rank files ---
+        ckpt_dir = args.ckpt_dir
+        if not os.path.isdir(ckpt_dir):
+            raise FileNotFoundError(f"ckpt_dir not found: {ckpt_dir}")
 
-    # Collect splat keys from rank 0
-    splat_keys = list(rank_ckpts[0]["splats"].keys())
-    print(f"Splat keys: {splat_keys}")
+        steps = find_steps(ckpt_dir)
+        if not steps:
+            raise RuntimeError(f"No ckpt_*_rank*.pt files found in {ckpt_dir}")
 
-    # Concatenate splats from all ranks along dim 0
-    merged_splats = {}
-    for k in splat_keys:
-        tensors = [ck["splats"][k] for ck in rank_ckpts]
-        merged_splats[k] = torch.cat(tensors, dim=0)
-        print(f"  {k}: {tensors[0].shape} x {len(ranks)} -> {merged_splats[k].shape}")
+        step = args.step if args.step is not None else steps[-1]
+        if step not in steps:
+            raise ValueError(f"Step {step} not found. Available steps: {steps}")
 
-    # Build merged checkpoint (non-splat fields taken from rank 0)
-    transform = rank_ckpts[0].get("transform", None)
-    if transform is None:
-        print("Warning: checkpoint has no 'transform' key (old format). Sky detection will be unavailable.")
-    merged = {
-        "step": step,
-        "splats": merged_splats,
-    }
-    if transform is not None:
-        merged["transform"] = transform
-    for optional_key in ("pose_adjust", "app_module", "bil_grids", "bilateral_grid_shape",
-                         "sky_hemisphere_center", "sky_depth_min"):
-        if optional_key in rank_ckpts[0]:
-            merged[optional_key] = rank_ckpts[0][optional_key]
+        ranks = find_ranks(ckpt_dir, step)
+        if not ranks:
+            raise RuntimeError(f"No rank files found for step {step}")
+
+        print(f"Step:  {step}")
+        print(f"Ranks: {ranks}")
+
+        rank_ckpts = []
+        for r in ranks:
+            path = os.path.join(ckpt_dir, f"ckpt_{step}_rank{r}.pt")
+            print(f"  Loading rank {r}: {path}")
+            ck = torch.load(path, map_location=device, weights_only=False)
+            rank_ckpts.append(ck)
+
+        splat_keys = list(rank_ckpts[0]["splats"].keys())
+        print(f"Splat keys: {splat_keys}")
+
+        merged_splats = {}
+        for k in splat_keys:
+            tensors = [ck["splats"][k] for ck in rank_ckpts]
+            merged_splats[k] = torch.cat(tensors, dim=0)
+            print(f"  {k}: {tensors[0].shape} x {len(ranks)} -> {merged_splats[k].shape}")
+
+        transform_src = rank_ckpts[0].get("transform", None)
+        if transform_src is None:
+            print("Warning: checkpoint has no 'transform' key (old format).")
+        merged = {"step": step, "splats": merged_splats}
+        if transform_src is not None:
+            merged["transform"] = transform_src
+        for optional_key in ("pose_adjust", "app_module", "bil_grids", "bilateral_grid_shape",
+                              "sky_hemisphere_center", "sky_depth_min"):
+            if optional_key in rank_ckpts[0]:
+                merged[optional_key] = rank_ckpts[0][optional_key]
+
+        default_out = os.path.join(ckpt_dir, f"ckpt_{step}_merged.pt")
 
     total_gs = merged_splats["means"].shape[0]
     print(f"Total Gaussians: {total_gs:,}")
+
+    # ------------------------------------------------------------------
+    # Infer / propagate transform, then detect / remove sky
+    # ------------------------------------------------------------------
+    transform = merged.get("transform", None)
 
     if args.sparse_dir is not None:
         if transform is None:
             print("Warning: checkpoint has no 'transform'; inferring normalization transform from sparse cameras+points.")
             transform = infer_transform_from_sparse(args.sparse_dir)
             print(f"Inferred transform:\n{transform.numpy()}")
-        colmap_pts = read_colmap_points(args.sparse_dir)
-        sky_mask = detect_sky_gaussians(merged_splats["means"], transform, colmap_pts)
+            merged["transform"] = transform  # write inferred transform into the output checkpoint
+
+        if "sky_hemisphere_center" in merged and "sky_depth_min" in merged:
+            print("Sky parameters already in checkpoint; skipping recomputation.")
+            sky_center = merged["sky_hemisphere_center"]
+            sky_depth_min = float(merged["sky_depth_min"])
+            dist = torch.norm(merged_splats["means"] - sky_center[None, :], dim=-1)
+            sky_mask = dist > sky_depth_min
+        else:
+            colmap_pts = read_colmap_points(args.sparse_dir)
+            sky_mask, sky_center, sky_depth_min = detect_sky_gaussians(merged_splats["means"], transform, colmap_pts)
+            merged["sky_hemisphere_center"] = sky_center
+            merged["sky_depth_min"] = torch.tensor(sky_depth_min)
         n_sky = sky_mask.sum().item()
         print(f"Sky Gaussians detected: {n_sky:,} / {total_gs:,} ({100.0 * n_sky / total_gs:.2f}%)")
         if args.remove_sky:
@@ -260,7 +299,7 @@ def main():
         merged_splats["scales"] = merged_splats["scales"].clamp(max=log_max)
         print(f"[clamp_scale={args.clamp_scale}] Clamped {n_clamped:,} Gaussians ({100*n_clamped/total_gs:.2f}%)")
 
-    out_path = args.output or os.path.join(ckpt_dir, f"ckpt_{step}_merged.pt")
+    out_path = args.output or default_out
     torch.save(merged, out_path)
     print(f"Saved: {out_path}")
 

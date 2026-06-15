@@ -135,6 +135,7 @@ def main(local_rank: int, world_rank, world_size: int, args):
     device = torch.device("cuda", local_rank)
 
     # Render dataset mode
+    _tree_labels_parts = []
     if args.render_dataset:
         if args.ckpt is None:
             raise ValueError("--ckpt is required for --render_dataset")
@@ -222,14 +223,18 @@ def main(local_rank: int, world_rank, world_size: int, args):
         )
     else:
         means, quats, scales, opacities, sh0, shN = [], [], [], [], [], []
+        _tree_labels_parts = []
         for ckpt_path in args.ckpt:
-            ckpt = torch.load(ckpt_path, map_location=device)["splats"]
+            ckpt_full = torch.load(ckpt_path, map_location=device, weights_only=False)
+            ckpt = ckpt_full["splats"]
             means.append(ckpt["means"])
             quats.append(F.normalize(ckpt["quats"], p=2, dim=-1))
             scales.append(torch.exp(ckpt["scales"]))
             opacities.append(torch.sigmoid(ckpt["opacities"]))
             sh0.append(ckpt["sh0"])
             shN.append(ckpt["shN"])
+            if "tree_labels" in ckpt_full:
+                _tree_labels_parts.append(ckpt_full["tree_labels"])
         means = torch.cat(means, dim=0)
         quats = torch.cat(quats, dim=0)
         scales = torch.cat(scales, dim=0)
@@ -239,6 +244,18 @@ def main(local_rank: int, world_rank, world_size: int, args):
         colors = torch.cat([sh0, shN], dim=-2)
         sh_degree = int(math.sqrt(colors.shape[-2]) - 1)
         print("Number of Gaussians:", len(means))
+
+    # Build per-tree Gaussian index from tree_labels if available
+    _tree_ids = []
+    _tree_index = {}  # tree_id (int) -> LongTensor of Gaussian indices
+    if _tree_labels_parts:
+        _labels = torch.cat(_tree_labels_parts).to(device)
+        _tree_ids = sorted(int(t) for t in _labels[_labels >= 0].unique().tolist())
+        for _tid in _tree_ids:
+            _tree_index[_tid] = (_labels == _tid).nonzero(as_tuple=True)[0]
+        del _labels
+        print(f"Tree labels loaded: {len(_tree_ids)} trees")
+    _filter = {"tree_id": None}  # None = show all Gaussians
 
     # register and open viewer
     @torch.no_grad()
@@ -256,6 +273,16 @@ def main(local_rank: int, world_rank, world_size: int, args):
         K = torch.from_numpy(K).float().to(device)
         viewmat = c2w.inverse()
 
+        # Apply tree filter: index into full arrays if a specific tree is selected
+        tid = _filter["tree_id"]
+        if tid is not None and tid in _tree_index:
+            idx = _tree_index[tid]
+            _means, _quats, _scales = means[idx], quats[idx], scales[idx]
+            _opacities, _colors = opacities[idx], colors[idx]
+        else:
+            _means, _quats, _scales = means, quats, scales
+            _opacities, _colors = opacities, colors
+
         RENDER_MODE_MAP = {
             "rgb": "RGB",
             "depth(accumulated)": "D",
@@ -264,11 +291,11 @@ def main(local_rank: int, world_rank, world_size: int, args):
         }
 
         render_colors, render_alphas, info = rasterization(
-            means,  # [N, 3]
-            quats,  # [N, 4]
-            scales,  # [N, 3]
-            opacities,  # [N]
-            colors,  # [N, S, 3]
+            _means,  # [N, 3]
+            _quats,  # [N, 4]
+            _scales,  # [N, 3]
+            _opacities,  # [N]
+            _colors,  # [N, S, 3]
             viewmat[None],  # [1, 4, 4]
             K[None],  # [1, 3, 3]
             width,
@@ -291,7 +318,7 @@ def main(local_rank: int, world_rank, world_size: int, args):
             with_ut=args.with_ut,
             with_eval3d=args.with_eval3d,
         )
-        render_tab_state.total_gs_count = len(means)
+        render_tab_state.total_gs_count = len(_means)
         render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()
 
         if render_tab_state.render_mode == "rgb":
@@ -324,12 +351,24 @@ def main(local_rank: int, world_rank, world_size: int, args):
         return renders
 
     server = viser.ViserServer(port=args.port, verbose=False)
-    _ = GsplatViewer(
+    _viewer = GsplatViewer(
         server=server,
         render_fn=viewer_render_fn,
         output_dir=Path(args.output_dir),
         mode="rendering",
     )
+
+    if _tree_ids:
+        _gui_tree = server.gui.add_number(
+            "Tree ID (−1 = all)", initial_value=-1,
+            min=-1, max=max(_tree_ids), step=1,
+        )
+        @_gui_tree.on_update
+        def _(_):
+            v = int(_gui_tree.value)
+            _filter["tree_id"] = None if v < 0 else v
+            _viewer.rerender(_)
+
     print("Viewer running... Ctrl+C to exit.")
     time.sleep(100000)
 

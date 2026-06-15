@@ -390,14 +390,14 @@ class Runner:
         print(f"Scene scale: {self.scene_scale:.4f} (parser: {self.parser.scene_scale:.4f}, global_scale: {cfg.global_scale})")
 
         # Compute sky_depth_min from point cloud max Z height
-        pts = self.parser.points  # (N, 3) in COLMAP world coordinates
+        pts = self.parser.points  # (N, 3) in normalized (training) space
         max_z = float(pts[:, 2].max())
         z_min = float(pts[:, 2].min())
         self.sky_depth_min = 0.5 * max_z
         # Ground floor: point cloud min Z minus a margin proportional to scene height
         scene_height = max_z - z_min
         self.z_floor = z_min - 0.02 * scene_height
-        # Sky hemisphere center: (xy_center, z_min) in COLMAP coordinates
+        # Sky hemisphere center: (xy_center, z_min) in normalized space — same frame as splats["means"]
         x_center = float((pts[:, 0].min() + pts[:, 0].max()) / 2)
         y_center = float((pts[:, 1].min() + pts[:, 1].max()) / 2)
         self.sky_hemisphere_center = torch.tensor(
