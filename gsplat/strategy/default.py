@@ -58,6 +58,12 @@ class DefaultStrategy(Strategy):
         key_for_gradient (str): Which variable uses for densification strategy.
           3DGS uses "means2d" gradient and 2DGS uses a similar gradient which stores
           in variable "gradient_2dgs".
+        max_gs (int): Soft cap on the number of GSs. Once reached, duplication/split
+          is skipped (pruning still runs). Set to <= 0 to disable. Default is 15_000_000.
+        max_mem_frac (float): Soft cap on GPU memory usage. Once the used fraction of
+          the GPU's total memory (as reported by `torch.cuda.mem_get_info`) reaches or
+          exceeds this value, duplication/split is skipped for that refine step (pruning
+          still runs). Set to <= 0 or >= 1 to disable. Default is 0.85.
 
     Examples:
 
@@ -94,6 +100,7 @@ class DefaultStrategy(Strategy):
     key_for_gradient: Literal["means2d", "gradient_2dgs"] = "means2d"
     max_sky_frac: float = 0.1
     max_gs: int = 15_000_000
+    max_mem_frac: float = 0.85
 
     def initialize_state(self, scene_scale: float = 1.0) -> Dict[str, Any]:
         """Initialize and return the running state for this strategy.
@@ -182,15 +189,18 @@ class DefaultStrategy(Strategy):
             and step % self.refine_every == 0
             and step % self.reset_every >= self.pause_refine_after_reset
         ):
-            # grow GSs (skip if already at soft cap)
+            # grow GSs (skip if already at soft cap, or GPU memory is nearly full)
             n_dupli, n_split = 0, 0
-            if self.max_gs <= 0 or len(params["means"]) < self.max_gs:
+            under_gs_cap = self.max_gs <= 0 or len(params["means"]) < self.max_gs
+            mem_over_limit = self._is_gpu_mem_over_limit(params["means"].device)
+            if under_gs_cap and not mem_over_limit:
                 n_dupli, n_split = self._grow_gs(params, optimizers, state, step)
             if self.verbose:
                 rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
                 print(
                     f"[rank{rank}] Step {step}: {n_dupli} GSs duplicated, {n_split} GSs split. "
                     f"Now having {len(params['means'])} GSs."
+                    + (" (growth skipped: GPU memory near limit)" if mem_over_limit else "")
                 )
 
             # Compute sky protect mask after grow (indices may have changed)
@@ -314,6 +324,14 @@ class DefaultStrategy(Strategy):
                 # normalize radii to [0, 1] screen space
                 radii / float(max(info["width"], info["height"])),
             )
+
+    def _is_gpu_mem_over_limit(self, device: torch.device) -> bool:
+        """Check whether GPU memory usage has reached `max_mem_frac` of total capacity."""
+        if self.max_mem_frac <= 0 or self.max_mem_frac >= 1 or device.type != "cuda":
+            return False
+        free, total = torch.cuda.mem_get_info(device)
+        used_frac = 1.0 - free / total
+        return used_frac >= self.max_mem_frac
 
     @torch.no_grad()
     def _grow_gs(

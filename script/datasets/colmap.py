@@ -491,14 +491,15 @@ class Dataset:
             # Convert to boolean: mask > 0 means valid (use this pixel)
             external_mask = external_mask > 0
 
-        # Load sky mask if available (True = sky pixel)
+        # Load sky mask if available. Raw values: 255=sky, 127=ground, 0=other.
+        # Kept as raw uint8 through remap/crop; split into sky_mask/ground_mask below.
         sky_mask = None
         sky_mask_path = self.parser.sky_mask_paths[index]
         if sky_mask_path is not None:
             sky_mask_raw = imageio.imread(sky_mask_path)
             if sky_mask_raw.ndim == 3:
                 sky_mask_raw = sky_mask_raw[..., 0]
-            sky_mask = sky_mask_raw > 0  # True = sky
+            sky_mask = sky_mask_raw.astype(np.uint8)
 
         # Load CA mask if available (float [0,1], 1=strong purple fringe)
         ca_mask = None
@@ -525,10 +526,8 @@ class Dataset:
                 )
                 external_mask = external_mask[y : y + h, x : x + w] > 0
             if sky_mask is not None:
-                sky_mask = cv2.remap(
-                    sky_mask.astype(np.uint8), mapx, mapy, cv2.INTER_NEAREST
-                )
-                sky_mask = sky_mask[y : y + h, x : x + w] > 0
+                sky_mask = cv2.remap(sky_mask, mapx, mapy, cv2.INTER_NEAREST)
+                sky_mask = sky_mask[y : y + h, x : x + w]
             if ca_mask is not None:
                 ca_mask = cv2.remap(ca_mask, mapx, mapy, cv2.INTER_LINEAR)
                 ca_mask = ca_mask[y : y + h, x : x + w]
@@ -570,7 +569,9 @@ class Dataset:
             data["mask"] = torch.from_numpy(final_mask.copy()).bool()
 
         if sky_mask is not None:
-            data["sky_mask"] = torch.from_numpy(sky_mask.copy()).bool()
+            # 255 = sky, 127 = ground, 0 = other.
+            data["sky_mask"] = torch.from_numpy(sky_mask == 255)
+            data["ground_mask"] = torch.from_numpy(sky_mask == 127)
 
         if ca_mask is not None:
             data["ca_mask"] = torch.from_numpy(ca_mask.copy()).float()

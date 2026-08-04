@@ -761,6 +761,7 @@ class Runner:
             image_ids = data["image_id"].to(device)
             masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
             sky_masks = data["sky_mask"].to(device) if "sky_mask" in data else None  # [1, H, W], True=sky
+            ground_masks = data["ground_mask"].to(device) if "ground_mask" in data else None  # [1, H, W], True=ground
             ca_masks = data["ca_mask"].to(device) if "ca_mask" in data else None  # [1, H, W], float [0,1]
             if cfg.depth_loss:
                 points = data["points"].to(device)  # [1, M, 2]
@@ -828,9 +829,11 @@ class Runner:
                 valid = masks  # [B, H, W], True=valid (non-photographer)
                 mask_expanded = valid.unsqueeze(-1).float()  # [B, H, W, 1]
 
-                # Sky pixels get 0.1 weight, non-sky pixels get 1.0
+                # Sky pixels get 0.1 weight, ground pixels get 0.2 weight, other pixels get 1.0
                 if sky_masks is not None:
                     weight = torch.where(sky_masks, torch.full_like(masks, 0.1, dtype=torch.float32), torch.ones_like(masks, dtype=torch.float32))
+                    if ground_masks is not None:
+                        weight = torch.where(ground_masks, torch.full_like(masks, 0.2, dtype=torch.float32), weight)
                     weight = weight * valid.float()  # zero out invalid pixels
                 else:
                     weight = valid.float()
@@ -960,9 +963,12 @@ class Runner:
                     # Input image: [H, W, 3] uint8
                     img_np = (pixels[0].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
 
-                    # Sky mask: [H, W] -> [H, W, 3] gray
+                    # Sky/ground mask: [H, W] -> [H, W, 3] gray, 3-value (255=sky, 127=ground, 0=other)
                     if sky_masks is not None:
-                        sky_np = (sky_masks[0].cpu().numpy().astype(np.uint8) * 255)
+                        sky_np = np.zeros(sky_masks.shape[1:], dtype=np.uint8)
+                        sky_np[sky_masks[0].cpu().numpy()] = 255
+                        if ground_masks is not None:
+                            sky_np[ground_masks[0].cpu().numpy()] = 127
                         sky_np = np.stack([sky_np] * 3, axis=-1)
                     else:
                         sky_np = np.zeros_like(img_np)

@@ -17,6 +17,7 @@ import os
 import sys
 
 import imageio
+import json
 import numpy as np
 import torch
 import tqdm
@@ -82,8 +83,10 @@ def main():
                    help="Horizontal distance from the tree's XY centre")
     p.add_argument("--n_frames",   type=int,   default=120,
                    help="Number of frames for a full 360° orbit")
-    p.add_argument("--resolution", type=int,   default=1024,
-                   help="Render resolution (square)")
+    p.add_argument("--resolution", type=int,   nargs="+", default=[1280],
+                   metavar="RES",
+                   help="Render resolution: one value for a square frame (e.g. 1280) "
+                        "or two for width height (e.g. 1280 720)")
     p.add_argument("--fov",        type=float, default=60.0,
                    help="Vertical field of view (degrees)")
     p.add_argument("--fps",        type=int,   default=30)
@@ -93,12 +96,21 @@ def main():
                    help="SH degree for colour rendering (default: inferred from checkpoint)")
     p.add_argument("--output_dir", default=None,
                    help="Output directory (default: same folder and stem as --ckpt)")
+    p.add_argument("--save_cameras", action="store_true",
+                   help="Save per-frame c2w and K to cameras.json in output_dir")
     p.add_argument("--depth", action="store_true",
                    help="Render depth map alongside RGB (side by side)")
     p.add_argument("--min_opacity", type=float, default=0.0,
                    help="Remove Gaussians with opacity below this threshold (default: 0, keep all)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
+
+    if len(args.resolution) == 1:
+        args.width, args.height_px = args.resolution[0], args.resolution[0]
+    elif len(args.resolution) == 2:
+        args.width, args.height_px = args.resolution
+    else:
+        p.error("--resolution takes either 1 value (square) or 2 values (width height)")
 
     # Default output dir: same directory, same stem as the input .pt
     if args.output_dir is None:
@@ -161,7 +173,7 @@ def main():
     print(f"Look-at target: {center}")
 
     # ── Intrinsics ────────────────────────────────────────────────────────────
-    W = H   = args.resolution
+    W, H    = args.width, args.height_px
     fy_val  = H / (2.0 * math.tan(math.radians(args.fov / 2.0)))
     K_np    = np.array([[fy_val, 0, W / 2.0],
                         [0, fy_val, H / 2.0],
@@ -173,6 +185,7 @@ def main():
     # ── Render loop ───────────────────────────────────────────────────────────
     video_path = os.path.join(args.output_dir, "orbit.mp4")
     writer     = imageio.get_writer(video_path, fps=args.fps)
+    cameras    = []   # collected when --save_cameras
 
     for i in tqdm.trange(args.n_frames, desc="Rendering"):
         theta = 2.0 * math.pi * i / args.n_frames
@@ -182,7 +195,17 @@ def main():
             cam_z,
         ], dtype=np.float32)
 
-        c2w     = lookat_c2w(eye, center, world_up)
+        c2w = lookat_c2w(eye, center, world_up)
+
+        if args.save_cameras:
+            cameras.append({
+                "frame": i,
+                "c2w": c2w.tolist(),
+                "K":   K_np.tolist(),
+                "width":  W,
+                "height": H,
+            })
+
         viewmat = torch.from_numpy(
             np.linalg.inv(c2w).astype(np.float32)
         ).unsqueeze(0).to(device)                                 # (1, 4, 4)
@@ -220,6 +243,13 @@ def main():
         writer.append_data(canvas)
 
     writer.close()
+
+    if args.save_cameras:
+        cam_path = os.path.join(args.output_dir, "cameras.json")
+        with open(cam_path, "w") as f:
+            json.dump(cameras, f, indent=2)
+        print(f"Cameras → {cam_path}")
+
     print(f"Frames → {frames_dir}/")
     print(f"Video  → {video_path}")
 

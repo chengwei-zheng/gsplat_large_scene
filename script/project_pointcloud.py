@@ -14,7 +14,12 @@ Usage:
         [--max_radius 20]     # maximum sphere radius in pixels (default: 20)
         [--gpu]               # use GPU (PyTorch CUDA) for rendering
         [--ground_white]      # paint background pixels whose ray points downward as white
+                              # (alpha=127, semi-transparent)
                               # assumes Z-up world coordinates
+        [--remove_ground]     # remove ground points via CSF before projection
+        [--ground_resolution 0.5]  # CSF cloth resolution in meters (default: 0.5)
+        [--ground_threshold 0.2]   # CSF point-to-cloth distance threshold (default: 0.2)
+        [--rigidness 3]            # CSF rigidness: 1=mountainous, 2=complex, 3=flat (default: 3)
 """
 
 import argparse
@@ -40,7 +45,39 @@ def parse_args():
     parser.add_argument("--gpu", action="store_true", help="Use GPU (CUDA) for rendering")
     parser.add_argument("--ground_white", action="store_true",
                         help="Paint downward-looking background pixels white (assumes Z-up world coords)")
+    parser.add_argument("--remove_ground", action="store_true",
+                        help="Remove ground points via CSF before projection")
+    parser.add_argument("--ground_resolution", type=float, default=0.5,
+                        help="CSF cloth resolution in meters (default: 0.5)")
+    parser.add_argument("--ground_threshold", type=float, default=0.2,
+                        help="CSF point-to-cloth distance threshold (default: 0.2)")
+    parser.add_argument("--rigidness", type=int, default=3, choices=[1, 2, 3],
+                        help="CSF rigidness: 1=mountainous, 2=complex, 3=flat (default: 3)")
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Ground removal (CSF)
+# ---------------------------------------------------------------------------
+
+def remove_ground_csf(pts_xyz, cloth_resolution, ground_threshold, rigidness):
+    import CSF
+    csf = CSF.CSF()
+    csf.params.cloth_resolution = cloth_resolution
+    csf.params.class_threshold = ground_threshold
+    csf.params.rigidness = rigidness
+    csf.params.bSloopSmooth = False
+    csf.params.interations = 500
+
+    csf.setPointCloud(pts_xyz)
+    ground_idx = CSF.VecInt()
+    non_ground_idx = CSF.VecInt()
+    csf.do_filtering(ground_idx, non_ground_idx, exportCloth=False)
+
+    non_ground_idx = np.array(list(non_ground_idx), dtype=np.int64)
+    print(f"Ground removal (CSF): {len(ground_idx)} ground / "
+          f"{len(non_ground_idx)} non-ground out of {len(pts_xyz)} total")
+    return non_ground_idx
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +98,7 @@ def project_points_cpu(pts_xyz, R, t, fx, fy, cx, cy, W, H):
     return u, v, z, in_bounds
 
 
-def apply_ground_white_cpu(canvas, covered, R, fx, fy, cx, cy, W, H):
+def apply_ground_white_cpu(canvas, covered, R, fx, fy, cx, cy, W, H, ground_alpha=127):
     """Set background pixels whose world-space ray points downward (Z < 0) to white."""
     uu_grid, vv_grid = np.meshgrid(np.arange(W, dtype=np.float32),
                                    np.arange(H, dtype=np.float32))  # (H, W)
@@ -74,6 +111,7 @@ def apply_ground_white_cpu(canvas, covered, R, fx, fy, cx, cy, W, H):
     ground_pixels = ~covered & looking_down
     canvas[ground_pixels] = 255
     covered[ground_pixels] = True
+    return ground_pixels, ground_alpha
 
 
 def render_image_cpu(pts_xyz, colors, R, t, cam, args):
@@ -114,10 +152,13 @@ def render_image_cpu(pts_xyz, colors, R, t, cam, args):
                 canvas[vv, uu] = c_vis
                 covered[vv, uu] = True
 
+    ground_pixels = None
     if args.ground_white:
-        apply_ground_white_cpu(canvas, covered, R, fx, fy, cx, cy, W, H)
+        ground_pixels, ground_alpha = apply_ground_white_cpu(canvas, covered, R, fx, fy, cx, cy, W, H)
 
     alpha = (covered * 255).astype(np.uint8)
+    if ground_pixels is not None:
+        alpha[ground_pixels] = ground_alpha
     return np.dstack([canvas, alpha])
 
 
@@ -125,7 +166,7 @@ def render_image_cpu(pts_xyz, colors, R, t, cam, args):
 # GPU rendering (PyTorch)
 # ---------------------------------------------------------------------------
 
-def apply_ground_white_gpu(canvas, covered, R_gpu, fx, fy, cx, cy, W, H, device):
+def apply_ground_white_gpu(canvas, covered, R_gpu, fx, fy, cx, cy, W, H, device, ground_alpha=127):
     import torch
     u_grid = torch.arange(W, device=device, dtype=torch.float32)
     v_grid = torch.arange(H, device=device, dtype=torch.float32)
@@ -139,6 +180,7 @@ def apply_ground_white_gpu(canvas, covered, R_gpu, fx, fy, cx, cy, W, H, device)
     ground_pixels = ~covered & looking_down
     canvas[ground_pixels] = 255
     covered[ground_pixels] = True
+    return ground_pixels, ground_alpha
 
 
 def render_image_gpu(pts, cols, R, t, cam, args):
@@ -207,10 +249,14 @@ def render_image_gpu(pts, cols, R, t, cam, args):
                 canvas[vv, uu] = cols_v
                 covered[vv, uu] = True
 
+    ground_pixels = None
     if args.ground_white:
-        apply_ground_white_gpu(canvas, covered, R_gpu, fx, fy, cx, cy, W, H, device)
+        ground_pixels, ground_alpha = apply_ground_white_gpu(canvas, covered, R_gpu, fx, fy, cx, cy, W, H, device)
 
-    alpha = (covered * 255).to(torch.uint8).unsqueeze(-1)
+    alpha = (covered * 255).to(torch.uint8)
+    if ground_pixels is not None:
+        alpha[ground_pixels] = ground_alpha
+    alpha = alpha.unsqueeze(-1)
     return torch.cat([canvas, alpha], dim=-1).cpu().numpy()
 
 
@@ -239,6 +285,14 @@ def main():
     pts_color = sm.point3D_colors  # (N, 3) uint8 RGB
 
     print(f"Points: {len(pts_xyz):,}")
+
+    if args.remove_ground:
+        non_ground = remove_ground_csf(
+            pts_xyz, args.ground_resolution, args.ground_threshold, args.rigidness
+        )
+        pts_xyz = pts_xyz[non_ground]
+        pts_color = pts_color[non_ground]
+        print(f"Points after ground removal: {len(pts_xyz):,}")
     print(f"Total images: {len(sm.images)}")
     print(f"Renderer: {'GPU (CUDA)' if args.gpu else 'CPU'}")
 

@@ -1,21 +1,42 @@
 """
-Generate binary sky masks from rendered point cloud images.
+Generate 3-class (sky / ground / other) masks from rendered point cloud images.
 
-Input images (from project_pointcloud.py):
+Input images (from project_pointcloud.py, saved as lossless PNG):
   - Alpha == 0          : sky (upward-looking rays, no points)
-  - Alpha == 255        : foreground / ground (point cloud or ground_white)
+  - Alpha == 127        : ground (ground_white placeholder pixels); treated the
+                          same as sky throughout the pipeline
+  - Alpha == 255        : foreground (real projected points)
+
+Alternative input (--from_raw_mask), e.g. a segmentation label map like
+/home/yiinqiang/SMBC/data/Wakasugi_FJD_jb1_2026-06-09-16-06-58/mask_ori:
+  - Grayscale value ~= raw_sky_value (default 127) : sky
+  - Any other grayscale value                      : foreground
+  (this mode has no ground concept; output is only sky/other)
+
+Output mask values:
+  - 255 : sky
+  - 127 : ground
+  - 0   : other (real structure / foreground)
 
 Pipeline per image:
-  1. Binarize: alpha > 0 → foreground (255), alpha == 0 → sky (0)
+  1. Binarize: alpha == 0 or alpha == 127 → sky/ground (0), else → foreground (255)
   2. Dilate foreground by morph_n pixels (merges nearby spheres)
+  2b. Morphologically close the alpha==127 "is_ground" mask by morph_n. This
+     bridges small holes caused by isolated real ground points in the point
+     cloud: such a point renders as ordinary foreground (alpha==255), not the
+     ground_white placeholder, so without closing it is indistinguishable from
+     a tree/building point and defaults to sky if later removed by the CC
+     filter in step 4.
   3. Compute Z = pixel area of one minimum sphere (5-px cross) after dilation
   4. CC filter: remove components with area < n_factor * Z
      (n_factor=2 means need at least 2 merged spheres → isolated spheres removed)
-  5. Invert: sky=255, foreground=0
-     (foreground boundary stays expanded from step 2 — conservative for sky mask)
+  5. Assemble 3-class mask: surviving foreground → other (0); everything else →
+     ground (127) if originally ground or a closed-in ground hole (step 2b),
+     else sky (255)
+     (foreground boundary stays expanded from step 2 — conservative for sky/ground mask)
   6. [optional] Color refinement: among alpha==0 pixels, additionally mark as sky
      those whose original RGB has large B channel and high overall brightness.
-     Final mask = step-5 mask | color sky pixels.
+     This overrides step-5 classification (including "other") for those pixels.
 
 Usage:
     python make_sky_mask.py \
@@ -29,6 +50,12 @@ Usage:
         [--sky_color]          # enable color-based sky refinement (requires --orig_dir)
         [--sky_b_thresh 100]   # B channel threshold for sky color detection (default: 100)
         [--sky_gray_thresh 100] # grayscale threshold for sky color detection (default: 100)
+        [--from_raw_mask]      # input_dir holds raw label masks instead of alpha-channel
+                                # renders; sky = grayscale value within raw_sky_tol of
+                                # raw_sky_value, instead of alpha == 0
+        [--raw_sky_value 127]  # grayscale value that marks sky in raw mask mode
+        [--raw_sky_tol 50]     # +/- tolerance around raw_sky_value
+        [--ground_alpha_value 127] # exact alpha value treated as ground (default: 127)
 """
 
 import argparse
@@ -59,7 +86,23 @@ def parse_args():
                         help="B channel threshold for sky color detection (default: 220)")
     parser.add_argument("--sky_gray_thresh", type=int, default=200,
                         help="Grayscale threshold for sky color detection (default: 200)")
+    parser.add_argument("--from_raw_mask", action="store_true",
+                        help="Treat input_dir images as raw label masks (grayscale) instead "
+                             "of alpha-channel renders: sky is the grayscale value close to "
+                             "--raw_sky_value, rather than alpha == 0")
+    parser.add_argument("--raw_sky_value", type=int, default=127,
+                        help="Grayscale value that marks sky in --from_raw_mask mode (default: 127)")
+    parser.add_argument("--raw_sky_tol", type=int, default=50,
+                        help="+/- tolerance around --raw_sky_value (default: 50)")
+    parser.add_argument("--ground_alpha_value", type=int, default=127,
+                        help="Exact alpha value treated as ground (default: 127). Input PNGs "
+                             "are lossless so this can be an exact match, no tolerance needed.")
     return parser.parse_args()
+
+
+SKY_VALUE = 255
+GROUND_VALUE = 127
+OTHER_VALUE = 0
 
 
 def make_kernel(n, shape):
@@ -102,15 +145,34 @@ def color_sky_mask(orig_bgr, alpha_zero, b_thresh, gray_thresh):
     return alpha_zero & looks_like_sky
 
 
+def raw_mask_sky(img, sky_value, tol):
+    """True where the (grayscale) raw label mask is within tol of sky_value."""
+    gray = img.astype(np.float32) if img.ndim == 2 else img.astype(np.float32).mean(axis=2)
+    return np.abs(gray - sky_value) <= tol
+
+
 def process_image(img, morph_n, n_factor, kernel_shape, return_intermediate=False,
-                  orig_bgr=None, sky_color=False, sky_b_thresh=100, sky_gray_thresh=100):
-    # 1. Binarize: alpha > 0 → 255 (foreground), alpha == 0 → 0 (sky)
-    #    Fall back to max(RGB) > 0 for legacy RGB images without alpha channel.
-    if img.ndim == 3 and img.shape[2] == 4:
-        alpha_zero = img[:, :, 3] == 0  # save for color refinement
+                  orig_bgr=None, sky_color=False, sky_b_thresh=100, sky_gray_thresh=100,
+                  from_raw_mask=False, raw_sky_value=127, raw_sky_tol=10,
+                  ground_alpha_value=127):
+    # 1. Binarize: foreground → 255, sky/ground → 0.
+    if from_raw_mask:
+        # Raw label mask: sky = grayscale value close to raw_sky_value. No ground concept.
+        alpha_zero = raw_mask_sky(img, raw_sky_value, raw_sky_tol)
+        is_ground = np.zeros_like(alpha_zero, dtype=bool)
         fg = (~alpha_zero).astype(np.uint8) * 255
+    elif img.ndim == 3 and img.shape[2] == 4:
+        # Alpha == 0 → sky. Alpha == ground_alpha_value → ground (ground_white
+        # placeholder), treated the same as sky. Alpha == 255 → foreground.
+        alpha = img[:, :, 3]
+        alpha_zero = alpha == 0  # save for color refinement
+        is_ground = alpha == ground_alpha_value
+        background = alpha_zero | is_ground
+        fg = (~background).astype(np.uint8) * 255
     else:
+        # Legacy RGB images without alpha channel: black pixels → sky. No ground concept.
         alpha_zero = img.max(axis=2) == 0
+        is_ground = np.zeros_like(alpha_zero, dtype=bool)
         fg = (~alpha_zero).astype(np.uint8) * 255
 
     k_n = make_kernel(morph_n, kernel_shape)
@@ -118,8 +180,21 @@ def process_image(img, morph_n, n_factor, kernel_shape, return_intermediate=Fals
     # 2. Dilate foreground — merges nearby spheres into larger components
     fg = cv2.dilate(fg, k_n)
 
-    # Intermediate result (after dilation, before CC filter)
-    intermediate = 255 - fg if return_intermediate else None
+    # Close small holes in is_ground caused by isolated real ground points: a
+    # sparse ground point in the point cloud renders as ordinary foreground
+    # (alpha==255, not the ground_white placeholder), so it is indistinguishable
+    # from a tree/building point at this stage. If the CC filter below removes it
+    # as noise, it must fall back to ground (not sky) — closing bridges these
+    # small holes using their surrounding placeholder-ground pixels.
+    is_ground_u8 = is_ground.astype(np.uint8) * 255
+    is_ground_closed = cv2.morphologyEx(is_ground_u8, cv2.MORPH_CLOSE, k_n) > 0
+
+    # Intermediate result (after dilation, before CC filter): 3-class, same
+    # sky/ground/other scheme as the final mask, so misclassifications are
+    # visible before the CC filter is even applied.
+    intermediate = np.where(fg == 255, np.uint8(OTHER_VALUE),
+                            np.where(is_ground_closed, np.uint8(GROUND_VALUE), np.uint8(SKY_VALUE))) \
+                   if return_intermediate else None
 
     # 3. Compute Z: area of one minimum sphere after dilation
     Z = compute_Z(morph_n, k_n)
@@ -133,15 +208,17 @@ def process_image(img, morph_n, n_factor, kernel_shape, return_intermediate=Fals
             filtered[labels == lbl] = 255
     fg = filtered
 
-    # 5. Invert: sky=255, foreground=0
-    sky_mask = 255 - fg
+    # 5. Assemble 3-class mask: surviving foreground -> other (0); everything else
+    # -> ground (127) if originally ground (or closed-in ground hole), else sky (255).
+    sky_mask = np.where(fg == 255, np.uint8(OTHER_VALUE),
+                        np.where(is_ground_closed, np.uint8(GROUND_VALUE), np.uint8(SKY_VALUE)))
 
-    # 6. Color refinement: union with color-based sky among alpha==0 pixels
+    # 6. Color refinement: force sky among alpha==0 pixels detected as sky by color
     if sky_color and orig_bgr is not None:
         if orig_bgr.shape[:2] != img.shape[:2]:
             orig_bgr = cv2.resize(orig_bgr, (img.shape[1], img.shape[0]))
         color_sky = color_sky_mask(orig_bgr, alpha_zero, sky_b_thresh, sky_gray_thresh)
-        sky_mask = np.where(color_sky, np.uint8(255), sky_mask)
+        sky_mask = np.where(color_sky, np.uint8(SKY_VALUE), sky_mask)
 
     return (sky_mask, intermediate) if return_intermediate else sky_mask
 
@@ -160,11 +237,14 @@ def find_orig_image(orig_dir, rel_path):
 
 
 def make_overlay(orig_bgr, sky_mask, alpha=0.5):
-    """Tint sky pixels (mask==255) with red on the original image."""
+    """Tint sky pixels (mask==SKY_VALUE) red and ground pixels (mask==GROUND_VALUE) green."""
     overlay = orig_bgr.copy()
-    sky = sky_mask == 255
+    sky = sky_mask == SKY_VALUE
+    ground = sky_mask == GROUND_VALUE
     overlay[sky] = (orig_bgr[sky] * (1 - alpha) +
                     np.array([0, 0, 200], dtype=np.float32) * alpha).astype(np.uint8)
+    overlay[ground] = (orig_bgr[ground] * (1 - alpha) +
+                       np.array([0, 200, 0], dtype=np.float32) * alpha).astype(np.uint8)
     return overlay
 
 
@@ -222,7 +302,11 @@ def main():
                                return_intermediate=args.save_intermediate,
                                orig_bgr=orig_bgr, sky_color=args.sky_color,
                                sky_b_thresh=args.sky_b_thresh,
-                               sky_gray_thresh=args.sky_gray_thresh)
+                               sky_gray_thresh=args.sky_gray_thresh,
+                               from_raw_mask=args.from_raw_mask,
+                               raw_sky_value=args.raw_sky_value,
+                               raw_sky_tol=args.raw_sky_tol,
+                               ground_alpha_value=args.ground_alpha_value)
         if args.save_intermediate:
             sky_mask, intermediate = result
             inter_path = os.path.join(inter_dir, rel)

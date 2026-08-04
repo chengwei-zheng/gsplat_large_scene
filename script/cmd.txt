@@ -9,18 +9,8 @@ colmap model_converter \
     --output_type BIN
 
 colmap model_converter \
-    --input_path /home/yiinqiang/SMBC/data/tanashi-peach1_20251129-124511_k1/temp_1110/perspective/sparse/0 \
-    --output_path /home/yiinqiang/SMBC/data/tanashi-peach1_20251129-124511_k1/temp_1110/perspective/sparse/0 \
-    --output_type BIN
-
-colmap model_converter \
-    --input_path /home/yiinqiang/SMBC/data/Forest_Karamatsu_plot2/perspective/sparse/0 \
-    --output_path /home/yiinqiang/SMBC/data/Forest_Karamatsu_plot2/perspective/sparse/0 \
-    --output_type BIN
-
-colmap model_converter \
-    --input_path /home/yiinqiang/SMBC/data/Forest_hinoki_260413_L2PRO/our_perspective/sparse_bad/0 \
-    --output_path /home/yiinqiang/SMBC/data/Forest_hinoki_260413_L2PRO/our_perspective/sparse_bad/0 \
+    --input_path /home/yiinqiang/SMBC/data/Wakasugi_FJD_jb1_2026-06-09-16-06-58/sparse_LAS/0 \
+    --output_path /home/yiinqiang/SMBC/data/Wakasugi_FJD_jb1_2026-06-09-16-06-58/sparse_LAS/0 \
     --output_type BIN
 
 
@@ -116,10 +106,10 @@ CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
     --strategy.max_gs 14000000
 
 
-CUDA_VISIBLE_DEVICES=0,1,3 torchrun --nproc_per_node=2 simple_trainer.py default \
+CUDA_VISIBLE_DEVICES=0,1 python simple_trainer.py default \
     --data_dir /home/yiinqiang/SMBC/data/Forest_hinoki_260413_L2PRO/perspective \
     --data_factor 1 \
-    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_3GPU \
+    --result_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_2GPU_lowGound \
     --steps_scaler 20.0 \
     --pose_opt \
     --test_every 0 \
@@ -133,7 +123,7 @@ CUDA_VISIBLE_DEVICES=0,1,3 torchrun --nproc_per_node=2 simple_trainer.py default
     --init_scale 0.3 \
     --use_bilateral_grid \
     --bilateral_grid_shape 1 1 4 \
-    --strategy.max_gs 32000000
+    --strategy.max_gs 10000000
 
 
 CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
@@ -206,11 +196,8 @@ CUDA_VISIBLE_DEVICES=0 python -m simple_viewer \
 
 CUDA_VISIBLE_DEVICES=0 python -m simple_viewer \
     --ckpt \
-          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank0.pt \
-          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank1.pt \
-          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank2.pt \
-          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/ckpts/ckpt_449999_rank3.pt \
-    --output_dir /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow016_SReg_BG114_4GPU/viewer/ \
+          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_2GPU_lowGound/ckpts/ckpt_599999_rank0.pt \
+          /home/yiinqiang/SMBC/gsplat/results_RawCMR/Forest_hinoki_260413_L2PRO_RawCMR_opti_global03_grow02_SReg_BG114_2GPU_lowGound/ckpts/ckpt_599999_rank1.pt \
     --port 8080
 
 # --- EXPORT CHECKPOINT ---
